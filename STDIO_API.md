@@ -6,15 +6,70 @@
 
 ## 启动方式
 
+### 基本用法
+
 ```bash
 tricode --stdio "你的指令"
 ```
+
+### 限制可用工具
+
+通过 `--tools` 参数可以指定 Agent 可以使用的工具白名单：
+
+```bash
+tricode --stdio --tools "read_file,search_context,plan" "你的指令"
+```
+
+**工具名称列表：**
+- `search_context` - 搜索文件内容
+- `read_file` - 读取文件
+- `create_file` - 创建文件
+- `edit_file` - 编辑文件
+- `list_directory` - 列出目录
+- `run_command` - 执行 shell 命令
+- `plan` - 任务计划管理
+- `start_session` - 启动交互式会话
+- `send_input` - 向会话发送输入
+- `read_output` - 读取会话输出
+- `close_session` - 关闭会话
+- `list_sessions` - 列出活动会话
+
+**注意事项：**
+- 工具名称使用逗号分隔，不要有空格
+- 如果不指定 `--tools` 参数，则所有工具都可用
+- `plan` 工具会自动包含在白名单中（即使未显式指定），因为它是 Agent 工作的必要前提
+- Agent 只能看到和使用白名单中的工具，不会知道其他工具的存在
+- 系统提示词会根据可用工具动态调整，只提及白名单中的工具
+- **智能工具检测**：当用户的请求需要白名单中不存在的工具时，Agent 会主动告知用户任务无法完成，并说明缺少哪些必要工具
+
+**使用场景：**
+- 只读操作：`--tools "read_file,search_context,list_directory,plan"`
+- 代码生成：`--tools "read_file,create_file,edit_file,plan"`
+- 命令执行：`--tools "run_command,read_file,plan"`
 
 ## 消息类型
 
 所有消息都是单行 JSON 对象，包含 `type` 字段标识消息类型。
 
-### 1. round - 执行轮次
+### 1. system - 系统消息
+
+系统级别的通知消息，包括会话 ID、会话恢复提示等。
+
+```json
+{"type": "system", "message": "Session ID: 2bc53e39"}
+```
+
+**字段说明：**
+- `message` (string): 系统消息内容
+
+**重要说明：**
+- Session ID 会在每次对话开始时的第一条消息输出
+- Session ID 可用于通过 `-r/--resume` 参数恢复之前的对话
+- 格式为 8 位随机字符串，会话数据保存在 `~/.tricode/session/` 目录
+
+---
+
+### 2. round - 执行轮次
 
 标识 Agent 进入新的思考/执行轮次。
 
@@ -27,7 +82,7 @@ tricode --stdio "你的指令"
 
 ---
 
-### 2. tool_call - 工具调用
+### 3. tool_call - 工具调用
 
 Agent 调用某个工具时触发。
 
@@ -47,7 +102,7 @@ Agent 调用某个工具时触发。
 
 ---
 
-### 3. tool_result - 工具执行结果
+### 4. tool_result - 工具执行结果
 
 工具执行完成后触发。
 
@@ -69,7 +124,7 @@ Agent 调用某个工具时触发。
 
 ---
 
-### 4. reminder - 警告/提醒
+### 5. reminder - 警告/提醒
 
 Agent 内部提醒消息（如未完成的计划任务）。
 
@@ -85,7 +140,7 @@ Agent 内部提醒消息（如未完成的计划任务）。
 
 ---
 
-### 5. final - 最终响应
+### 6. final - 最终响应
 
 Agent 完成任务后的最终回复。
 
@@ -110,6 +165,7 @@ tricode --stdio "list files in current directory"
 
 ### 输出流（JSON Lines）
 ```json
+{"type": "system", "message": "Session ID: 2bc53e39"}
 {"type": "round", "number": 1}
 {"type": "tool_call", "name": "list_directory", "arguments": {"path": "."}, "formatted": "LIST(\".\")"}
 {"type": "tool_result", "name": "list_directory", "success": true, "result": "总计 72\ndrwxrwxr-x  7 xrain xrain 4096 ...\n-rwxrwxr-x  1 xrain xrain 1140 tricode.py", "formatted": "[OK] 18 items"}

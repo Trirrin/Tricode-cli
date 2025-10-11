@@ -155,7 +155,48 @@ def format_tool_result(tool_name: str, success: bool, result: str, arguments: di
         preview = result[:100].replace('\n', ' ')
         return f"[OK] {preview}"
 
-def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, override_system_prompt: bool = False, resume_session_id: str = None) -> str:
+TOOL_DESCRIPTIONS = {
+    "plan": "MANDATORY first tool call (create/update/check/skip)",
+    "search_context": "Search for patterns in files (use liberally to explore)",
+    "read_file": "Read file contents",
+    "create_file": "Create new files",
+    "edit_file": "Modify existing files",
+    "list_directory": "List directory contents",
+    "run_command": "Execute shell commands",
+    "start_session": "Start interactive shell session (for SSH, Python REPL, etc.)",
+    "send_input": "Send commands to an active session",
+    "read_output": "Read output from an active session",
+    "close_session": "Close an active session",
+    "list_sessions": "List all active sessions"
+}
+
+def filter_tools_schema(allowed_tools: list = None) -> list:
+    if allowed_tools is None:
+        return TOOLS_SCHEMA
+    
+    filtered = []
+    for tool in TOOLS_SCHEMA:
+        tool_name = tool["function"]["name"]
+        if tool_name in allowed_tools:
+            filtered.append(tool)
+    
+    return filtered
+
+def build_tools_description(allowed_tools: list = None) -> str:
+    if allowed_tools is None:
+        tool_names = list(TOOL_DESCRIPTIONS.keys())
+        prefix = "Available tools:"
+    else:
+        tool_names = [t for t in TOOL_DESCRIPTIONS.keys() if t in allowed_tools]
+        prefix = f"Available tools (ONLY these {len(tool_names)} tools, no others):"
+    
+    lines = [prefix]
+    for tool_name in tool_names:
+        lines.append(f"- {tool_name}: {TOOL_DESCRIPTIONS[tool_name]}")
+    
+    return "\n".join(lines)
+
+def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, override_system_prompt: bool = False, resume_session_id: str = None, allowed_tools: list = None) -> str:
     config = load_config()
     
     api_key = config.get("openai_api_key")
@@ -186,28 +227,28 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
     else:
         session_id = str(uuid.uuid4())[:8]
         set_session_id(session_id)
+        writer.write_system(f"Session ID: {session_id}")
         messages = None
     
     if not messages:
+        tools_desc = build_tools_description(allowed_tools)
+        
+        has_session_tools = (
+            allowed_tools is None or 
+            any(t in allowed_tools for t in ["start_session", "send_input", "read_output", "close_session", "list_sessions"])
+        )
+        
         default_system_prompt = (
             "You are Tricode, a powerful autonomous agent running in terminal. "
             "You are a capable autonomous agent with access to file system tools. "
             "Your goal is to complete user requests efficiently and intelligently.\n\n"
-            "Available tools:\n"
-            "- plan: MANDATORY first tool call (create/update/check/skip)\n"
-            "- search_context: Search for patterns in files (use liberally to explore)\n"
-            "- read_file: Read file contents\n"
-            "- create_file: Create new files\n"
-            "- edit_file: Modify existing files\n"
-            "- list_directory: List directory contents\n"
-            "- run_command: Execute shell commands\n"
-            "- start_session: Start interactive shell session (for SSH, Python REPL, etc.)\n"
-            "- send_input: Send commands to an active session\n"
-            "- read_output: Read output from an active session\n"
-            "- close_session: Close an active session\n"
-            "- list_sessions: List all active sessions\n\n"
+            f"{tools_desc}\n\n"
             "CRITICAL: PLAN TOOL MUST BE YOUR FIRST TOOL CALL:\n"
             "Before using ANY other tool, you MUST call plan with one of these actions:\n\n"
+            "IMPORTANT: First check if you have ALL necessary tools to complete the request. "
+            "If you lack critical tools (e.g., need read_file but don't have it, or need edit_file but don't have it), "
+            "use plan(action='skip', reason='Missing required tools: [list]') and explain to the user that the task "
+            "is impossible without those tools. DO NOT create a plan or attempt the task if tools are insufficient.\n\n"
             "1. plan(action='create', tasks=[...]) - For multi-step tasks:\n"
             "   - User requests multiple operations (e.g., 'fix X and update Y')\n"
             "   - Task involves editing ≥2 files\n"
@@ -224,25 +265,51 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
             "   - Single command execution\n"
             "   - Simple questions about code\n\n"
             "If you try to use other tools before making this decision, they will be BLOCKED.\n\n"
-            "INTERACTIVE SESSION USAGE:\n"
-            "For persistent interactive processes (SSH, Python REPL, Docker exec):\n"
-            "1. Use start_session to launch the process - returns a session_id\n"
-            "2. Use send_input to send commands to the session\n"
-            "3. Use read_output to retrieve the output (wait for command completion)\n"
-            "4. Always close_session when done to clean up resources\n"
-            "Note: Sessions auto-expire after 30s of inactivity or 5 minutes total. Max 3 concurrent sessions.\n\n"
-            "Core principles:\n"
-            "1. Plan first: Break down user requests into clear tasks\n"
-            "2. Be proactive: Always use tools to verify and explore before concluding\n"
-            "3. Handle errors gracefully: If a tool fails, try alternative approaches\n"
-            "4. Search first: When uncertain about file names or locations, use search_context\n"
-            "5. Verify before acting: Read files before modifying them\n"
-            "6. Track progress: Update plan status after each task completion\n\n"
-            "Examples of proactive behavior:\n"
-            "- File not found? Search for similar names or patterns\n"
-            "- Unclear request? Search to understand the codebase structure\n"
-            "- Before editing? Read the file first to understand context\n\n"
-            "Never give up immediately when encountering errors. Try different approaches."
+        )
+        
+        if has_session_tools:
+            default_system_prompt += (
+                "INTERACTIVE SESSION USAGE:\n"
+                "For persistent interactive processes (SSH, Python REPL, Docker exec):\n"
+                "1. Use start_session to launch the process - returns a session_id\n"
+                "2. Use send_input to send commands to the session\n"
+                "3. Use read_output to retrieve the output (wait for command completion)\n"
+                "4. Always close_session when done to clean up resources\n"
+                "Note: Sessions auto-expire after 30s of inactivity or 5 minutes total. Max 3 concurrent sessions.\n\n"
+            )
+        
+        has_search = allowed_tools is None or "search_context" in allowed_tools
+        has_read = allowed_tools is None or "read_file" in allowed_tools
+        has_edit = allowed_tools is None or "edit_file" in allowed_tools or "create_file" in allowed_tools
+        
+        principles = [
+            "1. Plan first: Break down user requests into clear tasks",
+            "2. Be proactive: Always use tools to verify and explore before concluding",
+            "3. Handle errors gracefully: If a tool fails, try alternative approaches"
+        ]
+        
+        if has_search:
+            principles.append("4. Search first: When uncertain about file names or locations, use search_context")
+        if has_read and has_edit:
+            principles.append(f"{len(principles) + 1}. Verify before acting: Read files before modifying them")
+        principles.append(f"{len(principles) + 1}. Track progress: Update plan status after each task completion")
+        
+        default_system_prompt += "Core principles:\n" + "\n".join(principles) + "\n\n"
+        
+        if has_search or has_read or has_edit:
+            examples = ["Examples of proactive behavior:"]
+            if has_search:
+                examples.append("- File not found? Search for similar names or patterns")
+                examples.append("- Unclear request? Search to understand the codebase structure")
+            if has_read and has_edit:
+                examples.append("- Before editing? Read the file first to understand context")
+            default_system_prompt += "\n".join(examples) + "\n\n"
+        
+        default_system_prompt += (
+            "Never give up immediately when encountering errors. Try different approaches.\n\n"
+            "IMPORTANT: If the user's request cannot be completed with your available tools, "
+            "clearly tell them that the task is not possible with the current tool limitations. "
+            "Explain what tools would be needed and do not attempt to complete the task with inappropriate tools."
         )
         
         agents_md_content = load_agents_md()
@@ -260,7 +327,7 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
             {"role": "user", "content": user_input}
         ]
     
-    writer.write_system(f"Session ID: {session_id}")
+    filtered_tools = filter_tools_schema(allowed_tools)
     
     round_num = 0
     while True:
@@ -271,7 +338,7 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
-                tools=TOOLS_SCHEMA,
+                tools=filtered_tools,
                 tool_choice="auto"
             )
         except Exception as e:

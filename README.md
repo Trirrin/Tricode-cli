@@ -97,6 +97,20 @@ Priority: **Environment Variables > settings.json > Defaults**
 ### Options
 
 - `-v, --verbose`: Show detailed execution logs
+- `--stdio`: Output all messages in JSON format for programmatic integration
+- `--tools <list>`: Comma-separated list of allowed tools (e.g., `read_file,search_context`)
+  - Available tools: `search_context`, `read_file`, `create_file`, `edit_file`, `list_directory`, `run_command`, `plan`, `start_session`, `send_input`, `read_output`, `close_session`, `list_sessions`
+  - If not specified, all tools are available
+  - Note: `plan` tool is automatically included (required for agent operation)
+  - Agent only sees and uses whitelisted tools; system prompt adapts dynamically
+  - Smart limitation detection: Agent will tell you when a task cannot be completed due to missing tools
+  - Use cases:
+    - Only read operations: `--tools "read_file,search_context,list_directory"`
+    - Code generation: `--tools "read_file,create_file,edit_file"`
+    - Command execution: `--tools "run_command,read_file"`
+- `--override-system-prompt`: Replace default system prompt with AGENTS.md content
+- `-r, --resume <SESSION_ID>`: Resume a previous conversation session
+- `-l, --list-conversations`: List all available conversation sessions
 
 ## Examples
 
@@ -222,6 +236,20 @@ Priority: **Environment Variables > settings.json > Defaults**
 ### Options
 
 - `-v, --verbose`: Show detailed execution logs
+- `--stdio`: Output all messages in JSON format for programmatic integration
+- `--tools <list>`: Comma-separated list of allowed tools (e.g., `read_file,search_context`)
+  - Available tools: `search_context`, `read_file`, `create_file`, `edit_file`, `list_directory`, `run_command`, `plan`, `start_session`, `send_input`, `read_output`, `close_session`, `list_sessions`
+  - If not specified, all tools are available
+  - Note: `plan` tool is automatically included (required for agent operation)
+  - Agent only sees and uses whitelisted tools; system prompt adapts dynamically
+  - Smart limitation detection: Agent will tell you when a task cannot be completed due to missing tools
+  - Use cases:
+    - Only read operations: `--tools "read_file,search_context,list_directory"`
+    - Code generation: `--tools "read_file,create_file,edit_file"`
+    - Command execution: `--tools "run_command,read_file"`
+- `--override-system-prompt`: Replace default system prompt with AGENTS.md content
+- `-r, --resume <SESSION_ID>`: Resume a previous conversation session
+- `-l, --list-conversations`: List all available conversation sessions
 
 ## Examples
 

@@ -35,6 +35,12 @@ Examples:
     )
     
     parser.add_argument(
+        "--tools",
+        type=str,
+        help="Comma-separated list of allowed tools (e.g., 'read_file,search_context,plan'). If not specified, all tools are available."
+    )
+    
+    parser.add_argument(
         "--override-system-prompt",
         action="store_true",
         help="Replace default system prompt with AGENTS.md content instead of appending"
@@ -62,12 +68,19 @@ Examples:
     if not args.prompt:
         parser.error("the following arguments are required: prompt")
     
+    allowed_tools = None
+    if args.tools:
+        allowed_tools = [t.strip() for t in args.tools.split(',') if t.strip()]
+        if 'plan' not in allowed_tools:
+            allowed_tools.insert(0, 'plan')
+    
     result = run_agent(
         args.prompt,
         verbose=args.verbose,
         stdio_mode=args.stdio,
         override_system_prompt=args.override_system_prompt,
-        resume_session_id=args.resume
+        resume_session_id=args.resume,
+        allowed_tools=allowed_tools
     )
     
     if result:

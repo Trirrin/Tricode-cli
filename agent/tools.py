@@ -2,11 +2,22 @@ import os
 import re
 import subprocess
 import tempfile
-from typing import Tuple
+from typing import Tuple, Dict, Optional
 from datetime import datetime
 import stat
+import threading
+import queue
+import time
+import uuid
 
 CURRENT_PLAN = None
+
+ACTIVE_SESSIONS: Dict[str, dict] = {}
+SESSION_LOCK = threading.Lock()
+MAX_SESSIONS = 3
+SESSION_TIMEOUT = 300
+SESSION_IDLE_TIMEOUT = 30
+OUTPUT_BUFFER_SIZE = 4096
 
 TOOLS_SCHEMA = [
     {
@@ -191,6 +202,100 @@ TOOLS_SCHEMA = [
                     }
                 },
                 "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_session",
+            "description": "Start an interactive shell session for persistent command execution (e.g., SSH, Python REPL). Returns a session ID for subsequent operations.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Initial command to execute after starting the session (e.g., 'ssh user@host', 'python3', 'docker exec -it container bash')"
+                    },
+                    "shell": {
+                        "type": "string",
+                        "description": "Shell to use for the session",
+                        "default": "/bin/bash"
+                    }
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_input",
+            "description": "Send input/command to an active session",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "The session ID from start_session"
+                    },
+                    "input_text": {
+                        "type": "string",
+                        "description": "Text to send to the session stdin"
+                    }
+                },
+                "required": ["session_id", "input_text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_output",
+            "description": "Read output from an active session",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "The session ID from start_session"
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Maximum time to wait for output in seconds",
+                        "default": 2
+                    }
+                },
+                "required": ["session_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "close_session",
+            "description": "Close an active session and clean up resources",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "The session ID to close"
+                    }
+                },
+                "required": ["session_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_sessions",
+            "description": "List all active sessions with their status",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
             }
         }
     }
@@ -451,6 +556,188 @@ def run_command(command: str, timeout: int = 30) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Execution failed: {str(e)}"
 
+def _read_stream(stream, output_queue, stream_name):
+    try:
+        for line in iter(stream.readline, ''):
+            if line:
+                output_queue.put((stream_name, line))
+    except Exception:
+        pass
+    finally:
+        stream.close()
+
+def _cleanup_expired_sessions():
+    while True:
+        time.sleep(10)
+        with SESSION_LOCK:
+            now = time.time()
+            expired = []
+            for sid, session in ACTIVE_SESSIONS.items():
+                idle_time = now - session["last_accessed"]
+                total_time = now - session["created_at"]
+                if idle_time > SESSION_IDLE_TIMEOUT or total_time > SESSION_TIMEOUT:
+                    expired.append(sid)
+            
+            for sid in expired:
+                session = ACTIVE_SESSIONS[sid]
+                try:
+                    session["process"].terminate()
+                    session["process"].wait(timeout=2)
+                except Exception:
+                    try:
+                        session["process"].kill()
+                    except Exception:
+                        pass
+                del ACTIVE_SESSIONS[sid]
+
+_cleanup_thread = threading.Thread(target=_cleanup_expired_sessions, daemon=True)
+_cleanup_thread.start()
+
+def start_session(command: str, shell: str = "/bin/bash") -> Tuple[bool, str]:
+    with SESSION_LOCK:
+        if len(ACTIVE_SESSIONS) >= MAX_SESSIONS:
+            return False, f"Maximum {MAX_SESSIONS} sessions reached. Close existing sessions first."
+        
+        try:
+            process = subprocess.Popen(
+                [shell],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1
+            )
+            
+            session_id = str(uuid.uuid4())[:8]
+            output_queue = queue.Queue()
+            
+            stdout_thread = threading.Thread(
+                target=_read_stream,
+                args=(process.stdout, output_queue, "stdout"),
+                daemon=True
+            )
+            stderr_thread = threading.Thread(
+                target=_read_stream,
+                args=(process.stderr, output_queue, "stderr"),
+                daemon=True
+            )
+            
+            stdout_thread.start()
+            stderr_thread.start()
+            
+            ACTIVE_SESSIONS[session_id] = {
+                "process": process,
+                "output_queue": output_queue,
+                "created_at": time.time(),
+                "last_accessed": time.time(),
+                "command": command
+            }
+            
+            if command:
+                process.stdin.write(command + "\n")
+                process.stdin.flush()
+            
+            return True, f"Session {session_id} started"
+        
+        except Exception as e:
+            return False, f"Failed to start session: {str(e)}"
+
+def send_input(session_id: str, input_text: str) -> Tuple[bool, str]:
+    with SESSION_LOCK:
+        session = ACTIVE_SESSIONS.get(session_id)
+        if not session:
+            return False, f"Session {session_id} not found"
+        
+        try:
+            if session["process"].poll() is not None:
+                return False, f"Session {session_id} has terminated"
+            
+            session["process"].stdin.write(input_text + "\n")
+            session["process"].stdin.flush()
+            session["last_accessed"] = time.time()
+            
+            return True, f"Input sent to session {session_id}"
+        
+        except Exception as e:
+            return False, f"Failed to send input: {str(e)}"
+
+def read_output(session_id: str, timeout: int = 2) -> Tuple[bool, str]:
+    with SESSION_LOCK:
+        session = ACTIVE_SESSIONS.get(session_id)
+        if not session:
+            return False, f"Session {session_id} not found"
+        
+        session["last_accessed"] = time.time()
+    
+    try:
+        output_lines = []
+        total_size = 0
+        deadline = time.time() + timeout
+        
+        while time.time() < deadline:
+            try:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                
+                stream_name, line = session["output_queue"].get(timeout=min(remaining, 0.1))
+                output_lines.append(line.rstrip())
+                total_size += len(line)
+                
+                if total_size > OUTPUT_BUFFER_SIZE:
+                    output_lines.append(f"[output truncated at {OUTPUT_BUFFER_SIZE} bytes]")
+                    break
+            
+            except queue.Empty:
+                if output_lines:
+                    break
+                continue
+        
+        if not output_lines:
+            return True, "[no output within timeout]"
+        
+        return True, "\n".join(output_lines)
+    
+    except Exception as e:
+        return False, f"Failed to read output: {str(e)}"
+
+def close_session(session_id: str) -> Tuple[bool, str]:
+    with SESSION_LOCK:
+        session = ACTIVE_SESSIONS.get(session_id)
+        if not session:
+            return False, f"Session {session_id} not found"
+        
+        try:
+            process = session["process"]
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            
+            del ACTIVE_SESSIONS[session_id]
+            return True, f"Session {session_id} closed"
+        
+        except Exception as e:
+            return False, f"Failed to close session: {str(e)}"
+
+def list_sessions() -> Tuple[bool, str]:
+    with SESSION_LOCK:
+        if not ACTIVE_SESSIONS:
+            return True, "No active sessions"
+        
+        now = time.time()
+        lines = []
+        for sid, session in ACTIVE_SESSIONS.items():
+            age = int(now - session["created_at"])
+            idle = int(now - session["last_accessed"])
+            alive = "alive" if session["process"].poll() is None else "dead"
+            lines.append(f"{sid}: {alive}, age={age}s, idle={idle}s")
+        
+        return True, "\n".join(lines)
+
 def get_plan_reminder() -> str:
     if CURRENT_PLAN is None:
         return "WARNING: No execution plan created. Use plan(action='create', tasks=[...]) to create one."
@@ -495,6 +782,21 @@ def format_tool_call(name: str, arguments: dict) -> str:
     elif name == "run_command":
         command = arguments.get("command", "")
         return f'RUN({command})'
+    elif name == "start_session":
+        command = arguments.get("command", "")
+        return f'START_SESSION({command})'
+    elif name == "send_input":
+        sid = arguments.get("session_id", "")
+        text = arguments.get("input_text", "")
+        return f'SEND({sid}, "{text}")'
+    elif name == "read_output":
+        sid = arguments.get("session_id", "")
+        return f'READ_OUTPUT({sid})'
+    elif name == "close_session":
+        sid = arguments.get("session_id", "")
+        return f'CLOSE_SESSION({sid})'
+    elif name == "list_sessions":
+        return 'LIST_SESSIONS()'
     else:
         return f'{name.upper()}({arguments})'
 
@@ -536,5 +838,26 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
             arguments.get("command"),
             arguments.get("timeout", 30)
         )
+    elif name == "start_session":
+        return start_session(
+            arguments.get("command"),
+            arguments.get("shell", "/bin/bash")
+        )
+    elif name == "send_input":
+        return send_input(
+            arguments.get("session_id"),
+            arguments.get("input_text")
+        )
+    elif name == "read_output":
+        return read_output(
+            arguments.get("session_id"),
+            arguments.get("timeout", 2)
+        )
+    elif name == "close_session":
+        return close_session(
+            arguments.get("session_id")
+        )
+    elif name == "list_sessions":
+        return list_sessions()
     else:
         return False, f"Unknown tool: {name}"

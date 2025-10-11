@@ -63,6 +63,24 @@ def format_tool_result(tool_name: str, success: bool, result: str, arguments: di
         if lines > 0:
             return f"[OK] {lines} lines output"
         return f"[OK] no output"
+    elif tool_name == "start_session":
+        return result
+    elif tool_name == "send_input":
+        return result
+    elif tool_name == "read_output":
+        if not success:
+            return f"[FAIL] {result}"
+        lines = result.count('\n') if result != "[no output within timeout]" else 0
+        if lines > 0:
+            return f"[OK] {lines} lines output"
+        return f"[OK] no output"
+    elif tool_name == "close_session":
+        return result
+    elif tool_name == "list_sessions":
+        if "No active sessions" in result:
+            return "[OK] 0 sessions"
+        sessions = result.count('\n') + 1 if result else 0
+        return f"[OK] {sessions} sessions"
     else:
         preview = result[:100].replace('\n', ' ')
         return f"[OK] {preview}"
@@ -86,6 +104,7 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
     writer = JsonWriter() if stdio_mode else HumanWriter(verbose)
     
     default_system_prompt = (
+        "You are Tricode, a powerful autonomous agent running in terminal. "
         "You are a capable autonomous agent with access to file system tools. "
         "Your goal is to complete user requests efficiently and intelligently.\n\n"
         "Available tools:\n"
@@ -95,11 +114,23 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
         "- create_file: Create new files\n"
         "- edit_file: Modify existing files\n"
         "- list_directory: List directory contents\n"
-        "- run_command: Execute shell commands\n\n"
+        "- run_command: Execute shell commands\n"
+        "- start_session: Start interactive shell session (for SSH, Python REPL, etc.)\n"
+        "- send_input: Send commands to an active session\n"
+        "- read_output: Read output from an active session\n"
+        "- close_session: Close an active session\n"
+        "- list_sessions: List all active sessions\n\n"
         "PLAN TOOL USAGE:\n"
         "For complex or multi-step tasks, use plan(action='create', tasks=[...]) to track progress.\n"
         "Update task status as you progress: plan(action='update', task_id=X, status='in_progress'/'completed').\n"
         "If you create a plan, complete all tasks before finishing.\n\n"
+        "INTERACTIVE SESSION USAGE:\n"
+        "For persistent interactive processes (SSH, Python REPL, Docker exec):\n"
+        "1. Use start_session to launch the process - returns a session_id\n"
+        "2. Use send_input to send commands to the session\n"
+        "3. Use read_output to retrieve the output (wait for command completion)\n"
+        "4. Always close_session when done to clean up resources\n"
+        "Note: Sessions auto-expire after 30s of inactivity or 5 minutes total. Max 3 concurrent sessions.\n\n"
         "Core principles:\n"
         "1. Plan first: Break down user requests into clear tasks\n"
         "2. Be proactive: Always use tools to verify and explore before concluding\n"

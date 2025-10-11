@@ -1,8 +1,31 @@
 import json
+import os
+from pathlib import Path
 from openai import OpenAI
 from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, get_plan_reminder
 from .config import load_config, CONFIG_FILE
 from .output import HumanWriter, JsonWriter
+
+def load_agents_md() -> str:
+    agents_content = []
+    
+    local_path = Path.cwd() / "AGENTS.md"
+    if local_path.exists():
+        try:
+            with open(local_path, 'r', encoding='utf-8') as f:
+                agents_content.append(f.read().strip())
+        except Exception as e:
+            print(f"Warning: Failed to read {local_path}: {e}")
+    
+    global_path = Path.home() / ".tricode" / "AGENTS.md"
+    if global_path.exists():
+        try:
+            with open(global_path, 'r', encoding='utf-8') as f:
+                agents_content.append(f.read().strip())
+        except Exception as e:
+            print(f"Warning: Failed to read {global_path}: {e}")
+    
+    return "\n\n".join(agents_content) if agents_content else ""
 
 def format_tool_result(tool_name: str, success: bool, result: str, arguments: dict = None) -> str:
     if not success:
@@ -33,11 +56,18 @@ def format_tool_result(tool_name: str, success: bool, result: str, arguments: di
         return f"[OK] {items} items"
     elif tool_name == "plan":
         return result
+    elif tool_name == "run_command":
+        if not success:
+            return f"[FAIL] {result}"
+        lines = result.count('\n') if result != "[no output]" else 0
+        if lines > 0:
+            return f"[OK] {lines} lines output"
+        return f"[OK] no output"
     else:
         preview = result[:100].replace('\n', ' ')
         return f"[OK] {preview}"
 
-def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False) -> str:
+def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, override_system_prompt: bool = False) -> str:
     config = load_config()
     
     api_key = config.get("openai_api_key")
@@ -55,37 +85,47 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False) 
     
     writer = JsonWriter() if stdio_mode else HumanWriter(verbose)
     
+    default_system_prompt = (
+        "You are a capable autonomous agent with access to file system tools. "
+        "Your goal is to complete user requests efficiently and intelligently.\n\n"
+        "Available tools:\n"
+        "- plan: MANDATORY task management (create/update/check)\n"
+        "- search_context: Search for patterns in files (use liberally to explore)\n"
+        "- read_file: Read file contents\n"
+        "- create_file: Create new files\n"
+        "- edit_file: Modify existing files\n"
+        "- list_directory: List directory contents\n"
+        "- run_command: Execute shell commands\n\n"
+        "PLAN TOOL USAGE:\n"
+        "For complex or multi-step tasks, use plan(action='create', tasks=[...]) to track progress.\n"
+        "Update task status as you progress: plan(action='update', task_id=X, status='in_progress'/'completed').\n"
+        "If you create a plan, complete all tasks before finishing.\n\n"
+        "Core principles:\n"
+        "1. Plan first: Break down user requests into clear tasks\n"
+        "2. Be proactive: Always use tools to verify and explore before concluding\n"
+        "3. Handle errors gracefully: If a tool fails, try alternative approaches\n"
+        "4. Search first: When uncertain about file names or locations, use search_context\n"
+        "5. Verify before acting: Read files before modifying them\n"
+        "6. Track progress: Update plan status after each task completion\n\n"
+        "Examples of proactive behavior:\n"
+        "- File not found? Search for similar names or patterns\n"
+        "- Unclear request? Search to understand the codebase structure\n"
+        "- Before editing? Read the file first to understand context\n\n"
+        "Never give up immediately when encountering errors. Try different approaches."
+    )
+    
+    agents_md_content = load_agents_md()
+    
+    if agents_md_content:
+        if override_system_prompt:
+            system_prompt = agents_md_content
+        else:
+            system_prompt = default_system_prompt + "\n\n" + agents_md_content
+    else:
+        system_prompt = default_system_prompt
+    
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a capable autonomous agent with access to file system tools. "
-                "Your goal is to complete user requests efficiently and intelligently.\n\n"
-                "Available tools:\n"
-                "- plan: MANDATORY task management (create/update/check)\n"
-                "- search_context: Search for patterns in files (use liberally to explore)\n"
-                "- read_file: Read file contents\n"
-                "- create_file: Create new files\n"
-                "- edit_file: Modify existing files\n"
-                "- list_directory: List directory contents\n\n"
-                "PLAN TOOL USAGE:\n"
-                "For complex or multi-step tasks, use plan(action='create', tasks=[...]) to track progress.\n"
-                "Update task status as you progress: plan(action='update', task_id=X, status='in_progress'/'completed').\n"
-                "If you create a plan, complete all tasks before finishing.\n\n"
-                "Core principles:\n"
-                "1. Plan first: Break down user requests into clear tasks\n"
-                "2. Be proactive: Always use tools to verify and explore before concluding\n"
-                "3. Handle errors gracefully: If a tool fails, try alternative approaches\n"
-                "4. Search first: When uncertain about file names or locations, use search_context\n"
-                "5. Verify before acting: Read files before modifying them\n"
-                "6. Track progress: Update plan status after each task completion\n\n"
-                "Examples of proactive behavior:\n"
-                "- File not found? Search for similar names or patterns\n"
-                "- Unclear request? Search to understand the codebase structure\n"
-                "- Before editing? Read the file first to understand context\n\n"
-                "Never give up immediately when encountering errors. Try different approaches."
-            )
-        },
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_input}
     ]
     
@@ -122,7 +162,7 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False) 
                     continue
             final_content = message.content or "No response generated"
             writer.write_final(final_content)
-            return "" if stdio_mode else final_content
+            return ""
         
         messages.append({
             "role": "assistant",

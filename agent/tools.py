@@ -171,6 +171,28 @@ TOOLS_SCHEMA = [
                 "required": ["action"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": "Execute a shell command and return its output",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute"
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Maximum execution time in seconds",
+                        "default": 30
+                    }
+                },
+                "required": ["command"]
+            }
+        }
     }
 ]
 
@@ -402,6 +424,33 @@ def plan(action: str, tasks: list = None, task_id: int = None, status: str = Non
     else:
         return False, f"Unknown action: {action}"
 
+def run_command(command: str, timeout: int = 30) -> Tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+        
+        output_parts = []
+        if result.stdout:
+            output_parts.append(result.stdout)
+        if result.stderr:
+            output_parts.append(f"[stderr]\n{result.stderr}")
+        
+        output = "\n".join(output_parts) if output_parts else "[no output]"
+        
+        if result.returncode != 0:
+            return False, f"Exit code {result.returncode}\n{output}"
+        
+        return True, output
+    except subprocess.TimeoutExpired:
+        return False, f"Command timed out after {timeout} seconds"
+    except Exception as e:
+        return False, f"Execution failed: {str(e)}"
+
 def get_plan_reminder() -> str:
     if CURRENT_PLAN is None:
         return "WARNING: No execution plan created. Use plan(action='create', tasks=[...]) to create one."
@@ -443,6 +492,9 @@ def format_tool_call(name: str, arguments: dict) -> str:
     elif name == "plan":
         action = arguments.get("action", "").upper()
         return f'PLAN {action}'
+    elif name == "run_command":
+        command = arguments.get("command", "")
+        return f'RUN({command})'
     else:
         return f'{name.upper()}({arguments})'
 
@@ -478,6 +530,11 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
             arguments.get("tasks"),
             arguments.get("task_id"),
             arguments.get("status")
+        )
+    elif name == "run_command":
+        return run_command(
+            arguments.get("command"),
+            arguments.get("timeout", 30)
         )
     else:
         return False, f"Unknown tool: {name}"

@@ -33,12 +33,19 @@ Examples:
         help="Output all messages in JSON format for programmatic integration"
     )
     
+    parser.add_argument(
+        "--override-system-prompt",
+        action="store_true",
+        help="Replace default system prompt with AGENTS.md content instead of appending"
+    )
+    
     args = parser.parse_args()
     
     result = run_agent(
         args.prompt,
         verbose=args.verbose,
-        stdio_mode=args.stdio
+        stdio_mode=args.stdio,
+        override_system_prompt=args.override_system_prompt
     )
     
     if result:

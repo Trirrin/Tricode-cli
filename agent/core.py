@@ -31,7 +31,7 @@ def format_tool_result(tool_name: str, success: bool, result: str, arguments: di
         items = result.count('\n') + 1 if result else 0
         return f"[OK] {items} items"
     elif tool_name == "plan":
-        return f"[OK]\n{result}"
+        return result
     else:
         preview = result[:100].replace('\n', ' ')
         return f"[OK] {preview}"
@@ -141,11 +141,17 @@ def run_agent(user_input: str, verbose: bool = False) -> str:
             except json.JSONDecodeError:
                 func_args = {}
             
-            print(f"  {format_tool_call(func_name, func_args)}")
+            if func_name == "plan":
+                print(format_tool_call(func_name, func_args))
+            else:
+                print(f"  {format_tool_call(func_name, func_args)}")
             
             success, result = execute_tool(func_name, func_args)
             
-            print(f"  ↳ {format_tool_result(func_name, success, result, func_args)}")
+            if func_name == "plan":
+                print(format_tool_result(func_name, success, result, func_args))
+            else:
+                print(f"  ↳ {format_tool_result(func_name, success, result, func_args)}")
             
             if verbose:
                 print(f"  Full result:\n{result}")

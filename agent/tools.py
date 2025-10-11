@@ -359,7 +359,7 @@ def plan(action: str, tasks: list = None, task_id: int = None, status: str = Non
         }
         color = color_map.get(task["status"], "")
         reset = "\033[0m" if color else ""
-        prefix = "↳" if is_first else " "
+        prefix = "↳ " if is_first else "  "
         return f"{prefix}- {color}{task['desc']}{reset}"
     
     if action == "create":

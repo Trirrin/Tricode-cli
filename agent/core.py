@@ -2,6 +2,7 @@ import json
 from openai import OpenAI
 from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, get_plan_reminder
 from .config import load_config, CONFIG_FILE
+from .output import HumanWriter, JsonWriter
 
 def format_tool_result(tool_name: str, success: bool, result: str, arguments: dict = None) -> str:
     if not success:
@@ -36,7 +37,7 @@ def format_tool_result(tool_name: str, success: bool, result: str, arguments: di
         preview = result[:100].replace('\n', ' ')
         return f"[OK] {preview}"
 
-def run_agent(user_input: str, verbose: bool = False) -> str:
+def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False) -> str:
     config = load_config()
     
     api_key = config.get("openai_api_key")
@@ -51,6 +52,8 @@ def run_agent(user_input: str, verbose: bool = False) -> str:
         client_kwargs["base_url"] = base_url
     
     client = OpenAI(**client_kwargs)
+    
+    writer = JsonWriter() if stdio_mode else HumanWriter(verbose)
     
     messages = [
         {
@@ -89,8 +92,7 @@ def run_agent(user_input: str, verbose: bool = False) -> str:
     round_num = 0
     while True:
         round_num += 1
-        if verbose:
-            print(f"\n[Round {round_num}]")
+        writer.write_round(round_num)
         
         try:
             response = client.chat.completions.create(
@@ -108,7 +110,7 @@ def run_agent(user_input: str, verbose: bool = False) -> str:
             if round_num > 3:
                 reminder = get_plan_reminder()
                 if reminder:
-                    print(f"\n{reminder}\n")
+                    writer.write_reminder(reminder)
                     messages.append({
                         "role": "assistant",
                         "content": message.content
@@ -118,7 +120,9 @@ def run_agent(user_input: str, verbose: bool = False) -> str:
                         "content": reminder
                     })
                     continue
-            return message.content or "No response generated"
+            final_content = message.content or "No response generated"
+            writer.write_final(final_content)
+            return "" if stdio_mode else final_content
         
         messages.append({
             "role": "assistant",
@@ -142,20 +146,13 @@ def run_agent(user_input: str, verbose: bool = False) -> str:
             except json.JSONDecodeError:
                 func_args = {}
             
-            if func_name == "plan":
-                print(format_tool_call(func_name, func_args))
-            else:
-                print(f"  {format_tool_call(func_name, func_args)}")
+            formatted_call = format_tool_call(func_name, func_args)
+            writer.write_tool_call(func_name, func_args, formatted_call)
             
             success, result = execute_tool(func_name, func_args)
             
-            if func_name == "plan":
-                print(format_tool_result(func_name, success, result, func_args))
-            else:
-                print(f"  ↳ {format_tool_result(func_name, success, result, func_args)}")
-            
-            if verbose:
-                print(f"  Full result:\n{result}")
+            formatted_result = format_tool_result(func_name, success, result, func_args)
+            writer.write_tool_result(func_name, success, result, formatted_result)
             
             messages.append({
                 "role": "tool",

@@ -27,14 +27,22 @@ Examples:
         help="Show detailed execution logs"
     )
     
+    parser.add_argument(
+        "--stdio",
+        action="store_true",
+        help="Output all messages in JSON format for programmatic integration"
+    )
+    
     args = parser.parse_args()
     
     result = run_agent(
         args.prompt,
-        verbose=args.verbose
+        verbose=args.verbose,
+        stdio_mode=args.stdio
     )
     
-    print(result)
+    if result:
+        print(result)
 
 if __name__ == "__main__":
     main()

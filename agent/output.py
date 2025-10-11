@@ -52,7 +52,8 @@ class HumanWriter(OutputWriter):
             print(f"\n[Round {round_num}]")
     
     def write_reminder(self, message: str):
-        print(f"\n{message}\n")
+        if self.verbose:
+            print(f"\n[REMINDER] {message}\n")
     
     def write_final(self, content: str):
         print(content)

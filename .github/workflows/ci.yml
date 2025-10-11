@@ -1,0 +1,35 @@
+name: Build with PyInstaller
+
+on:
+  push:
+    branches:
+      - '**'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller tricode.spec || pyinstaller --onefile tricode.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: pyinstaller-dist
+          path: dist/

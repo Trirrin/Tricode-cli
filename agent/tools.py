@@ -64,6 +64,20 @@ def restore_plan(session_id: str) -> None:
 def get_plan_state() -> Optional[dict]:
     return CURRENT_PLAN
 
+def get_plan_final_reminder() -> str:
+    if CURRENT_PLAN is None:
+        return None
+    
+    incomplete = [t for t in CURRENT_PLAN["tasks"] if t["status"] != "completed"]
+    if not incomplete:
+        return None
+    
+    result = [f"⚠️ WARNING: {len(incomplete)} task(s) still incomplete:"]
+    for task in incomplete:
+        result.append(f"  [{task['id']}] {task['status']:12} - {task['desc']}")
+    result.append("\nYou must complete all tasks before finishing.")
+    return "\n".join(result)
+
 ACTIVE_SESSIONS: Dict[str, dict] = {}
 SESSION_LOCK = threading.Lock()
 MAX_SESSIONS = 3
@@ -834,10 +848,7 @@ def get_plan_reminder() -> str:
             f"If you finished it, call plan(action='update', task_id={task['id']}, status='completed')."
         )
     
-    result = [f"WARNING: {len(incomplete)} task(s) still incomplete:"]
-    for task in incomplete:
-        result.append(f"  [{task['id']}] {task['status']:12} - {task['desc']}")
-    return "\n".join(result)
+    return None
 
 def format_tool_call(name: str, arguments: dict) -> str:
     if name == "search_context":
@@ -898,7 +909,7 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
             "or plan(action='skip', reason='...') for simple tasks."
         )
     
-    significant_action_tools = ["edit_file", "create_file", "run_command"]
+    significant_action_tools = ["read_file", "edit_file", "create_file", "run_command"]
     if name in significant_action_tools and CURRENT_PLAN is not None:
         SIGNIFICANT_ACTIONS_COUNT += 1
     

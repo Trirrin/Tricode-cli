@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 from datetime import datetime
 from openai import OpenAI
-from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, get_plan_reminder, set_session_id, restore_plan
+from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, get_plan_reminder, get_plan_final_reminder, set_session_id, restore_plan
 from .config import load_config, CONFIG_FILE
 from .output import HumanWriter, JsonWriter
 
@@ -281,7 +281,7 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
         
         if not message.tool_calls:
             if round_num > 1:
-                reminder = get_plan_reminder()
+                reminder = get_plan_final_reminder()
                 if reminder:
                     writer.write_reminder(reminder)
                     assistant_content = (message.content or "") + f"\n\n[SYSTEM REMINDER]\n{reminder}"

@@ -65,10 +65,10 @@ def run_agent(user_input: str, verbose: bool = False) -> str:
                 "- create_file: Create new files\n"
                 "- edit_file: Modify existing files\n"
                 "- list_directory: List directory contents\n\n"
-                "CRITICAL REQUIREMENT:\n"
-                "You MUST use plan(action='create', tasks=[...]) at the start of ANY non-trivial task.\n"
+                "PLAN TOOL USAGE:\n"
+                "For complex or multi-step tasks, use plan(action='create', tasks=[...]) to track progress.\n"
                 "Update task status as you progress: plan(action='update', task_id=X, status='in_progress'/'completed').\n"
-                "Do NOT finish until all tasks are marked 'completed'.\n\n"
+                "If you create a plan, complete all tasks before finishing.\n\n"
                 "Core principles:\n"
                 "1. Plan first: Break down user requests into clear tasks\n"
                 "2. Be proactive: Always use tools to verify and explore before concluding\n"
@@ -105,18 +105,19 @@ def run_agent(user_input: str, verbose: bool = False) -> str:
         message = response.choices[0].message
         
         if not message.tool_calls:
-            reminder = get_plan_reminder()
-            if reminder:
-                print(f"\n{reminder}\n")
-                messages.append({
-                    "role": "assistant",
-                    "content": message.content
-                })
-                messages.append({
-                    "role": "user",
-                    "content": reminder
-                })
-                continue
+            if round_num > 3:
+                reminder = get_plan_reminder()
+                if reminder:
+                    print(f"\n{reminder}\n")
+                    messages.append({
+                        "role": "assistant",
+                        "content": message.content
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": reminder
+                    })
+                    continue
             return message.content or "No response generated"
         
         messages.append({

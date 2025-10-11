@@ -23,6 +23,10 @@ class OutputWriter(ABC):
     @abstractmethod
     def write_final(self, content: str):
         pass
+    
+    @abstractmethod
+    def write_system(self, message: str):
+        pass
 
 class HumanWriter(OutputWriter):
     def __init__(self, verbose: bool = False):
@@ -52,6 +56,10 @@ class HumanWriter(OutputWriter):
     
     def write_final(self, content: str):
         print(content)
+    
+    def write_system(self, message: str):
+        if self.verbose:
+            print(f"[{message}]")
 
 class JsonWriter(OutputWriter):
     def _write_json(self, obj: Dict[str, Any]):
@@ -90,4 +98,10 @@ class JsonWriter(OutputWriter):
         self._write_json({
             "type": "final",
             "content": content
+        })
+    
+    def write_system(self, message: str):
+        self._write_json({
+            "type": "system",
+            "message": message
         })

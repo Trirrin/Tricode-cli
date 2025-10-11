@@ -23,11 +23,23 @@ def ensure_config_exists() -> None:
 def load_config() -> Dict[str, Any]:
     ensure_config_exists()
     
+    config = DEFAULT_CONFIG.copy()
+    
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            file_config = json.load(f)
+            config.update(file_config)
     except Exception:
-        return DEFAULT_CONFIG.copy()
+        pass
+    
+    env_prefix = "TRICODE_"
+    for key in config.keys():
+        env_key = env_prefix + key.upper()
+        env_value = os.getenv(env_key)
+        if env_value is not None:
+            config[key] = env_value
+    
+    return config
 
 def get_config_value(key: str, default: Any = None) -> Any:
     config = load_config()

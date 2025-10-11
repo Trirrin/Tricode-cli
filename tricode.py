@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 import argparse
-from agent import run_agent
+from agent import run_agent, list_conversations
 
 def main():
     parser = argparse.ArgumentParser(
@@ -18,6 +18,7 @@ Examples:
     parser.add_argument(
         "prompt",
         type=str,
+        nargs='?',
         help="Natural language instruction for the agent"
     )
     
@@ -39,13 +40,34 @@ Examples:
         help="Replace default system prompt with AGENTS.md content instead of appending"
     )
     
+    parser.add_argument(
+        "-r", "--resume",
+        type=str,
+        metavar="SESSION_ID",
+        help="Resume a previous conversation session by ID"
+    )
+    
+    parser.add_argument(
+        "-l", "--list-conversations",
+        action="store_true",
+        help="List all available conversation sessions"
+    )
+    
     args = parser.parse_args()
+    
+    if args.list_conversations:
+        list_conversations()
+        return
+    
+    if not args.prompt:
+        parser.error("the following arguments are required: prompt")
     
     result = run_agent(
         args.prompt,
         verbose=args.verbose,
         stdio_mode=args.stdio,
-        override_system_prompt=args.override_system_prompt
+        override_system_prompt=args.override_system_prompt,
+        resume_session_id=args.resume
     )
     
     if result:

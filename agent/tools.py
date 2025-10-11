@@ -9,8 +9,60 @@ import threading
 import queue
 import time
 import uuid
+import json
+from pathlib import Path
 
 CURRENT_PLAN = None
+CURRENT_SESSION_ID = None
+PLAN_DECISION_MADE = False
+SIGNIFICANT_ACTIONS_COUNT = 0
+LAST_PLAN_UPDATE_AT = 0
+
+def get_plan_dir() -> Path:
+    plan_dir = Path.home() / ".tricode" / "plans"
+    plan_dir.mkdir(parents=True, exist_ok=True)
+    return plan_dir
+
+def save_plan_state(session_id: str, plan_data: dict) -> None:
+    if not session_id:
+        return
+    plan_file = get_plan_dir() / f"{session_id}.json"
+    try:
+        with open(plan_file, 'w', encoding='utf-8') as f:
+            json.dump(plan_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Warning: Failed to save plan for session {session_id}: {e}")
+
+def load_plan_state(session_id: str) -> Optional[dict]:
+    if not session_id:
+        return None
+    plan_file = get_plan_dir() / f"{session_id}.json"
+    if not plan_file.exists():
+        return None
+    try:
+        with open(plan_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Warning: Failed to load plan for session {session_id}: {e}")
+        return None
+
+def set_session_id(session_id: str) -> None:
+    global CURRENT_SESSION_ID, PLAN_DECISION_MADE, SIGNIFICANT_ACTIONS_COUNT, LAST_PLAN_UPDATE_AT
+    CURRENT_SESSION_ID = session_id
+    PLAN_DECISION_MADE = False
+    SIGNIFICANT_ACTIONS_COUNT = 0
+    LAST_PLAN_UPDATE_AT = 0
+
+def restore_plan(session_id: str) -> None:
+    global CURRENT_PLAN, PLAN_DECISION_MADE, SIGNIFICANT_ACTIONS_COUNT
+    plan_data = load_plan_state(session_id)
+    if plan_data:
+        CURRENT_PLAN = plan_data
+        PLAN_DECISION_MADE = True
+        SIGNIFICANT_ACTIONS_COUNT = 0
+
+def get_plan_state() -> Optional[dict]:
+    return CURRENT_PLAN
 
 ACTIVE_SESSIONS: Dict[str, dict] = {}
 SESSION_LOCK = threading.Lock()
@@ -155,14 +207,14 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "plan",
-            "description": "Manage task execution plan. MUST be called with 'create' action at the start of any non-trivial task.",
+            "description": "Manage task execution plan. MUST be called in the FIRST round: either 'create' for multi-step tasks or 'skip' for simple tasks.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["create", "update", "check"],
-                        "description": "Action to perform: 'create' to initialize plan with tasks, 'update' to change task status, 'check' to view current plan"
+                        "enum": ["create", "update", "check", "skip"],
+                        "description": "Action to perform: 'create' to initialize plan with tasks, 'update' to change task status, 'check' to view current plan, 'skip' to explicitly mark this as a simple task that doesn't need planning"
                     },
                     "tasks": {
                         "type": "array",
@@ -177,6 +229,10 @@ TOOLS_SCHEMA = [
                         "type": "string",
                         "enum": ["pending", "in_progress", "completed"],
                         "description": "New status for the task (only for 'update' action)"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Brief reason for skipping plan (only for 'skip' action)"
                     }
                 },
                 "required": ["action"]
@@ -475,8 +531,8 @@ def _fallback_list_directory(path: str, show_hidden: bool = True) -> Tuple[bool,
     except Exception as e:
         return False, f"List failed: {str(e)}"
 
-def plan(action: str, tasks: list = None, task_id: int = None, status: str = None) -> Tuple[bool, str]:
-    global CURRENT_PLAN
+def plan(action: str, tasks: list = None, task_id: int = None, status: str = None, reason: str = None) -> Tuple[bool, str]:
+    global CURRENT_PLAN, PLAN_DECISION_MADE, SIGNIFICANT_ACTIONS_COUNT, LAST_PLAN_UPDATE_AT
     
     def format_task(task, is_first=False):
         color_map = {
@@ -496,10 +552,20 @@ def plan(action: str, tasks: list = None, task_id: int = None, status: str = Non
             "tasks": [{"id": i+1, "desc": t, "status": "pending"} for i, t in enumerate(tasks)],
             "created_at": datetime.now().isoformat()
         }
+        PLAN_DECISION_MADE = True
+        SIGNIFICANT_ACTIONS_COUNT = 0
+        LAST_PLAN_UPDATE_AT = 0
+        if CURRENT_SESSION_ID:
+            save_plan_state(CURRENT_SESSION_ID, CURRENT_PLAN)
         result = []
         for i, task in enumerate(CURRENT_PLAN["tasks"]):
             result.append(format_task(task, is_first=(i==0)))
         return True, "\n".join(result)
+    
+    elif action == "skip":
+        PLAN_DECISION_MADE = True
+        skip_msg = f"Plan skipped: {reason}" if reason else "Plan skipped (simple task)"
+        return True, skip_msg
     
     elif action == "update":
         if CURRENT_PLAN is None:
@@ -512,6 +578,10 @@ def plan(action: str, tasks: list = None, task_id: int = None, status: str = Non
             return False, f"Task ID {task_id} not found"
         
         task["status"] = status
+        SIGNIFICANT_ACTIONS_COUNT = 0
+        LAST_PLAN_UPDATE_AT = SIGNIFICANT_ACTIONS_COUNT
+        if CURRENT_SESSION_ID:
+            save_plan_state(CURRENT_SESSION_ID, CURRENT_PLAN)
         result = []
         for i, t in enumerate(CURRENT_PLAN["tasks"]):
             result.append(format_task(t, is_first=(i==0)))
@@ -740,11 +810,29 @@ def list_sessions() -> Tuple[bool, str]:
 
 def get_plan_reminder() -> str:
     if CURRENT_PLAN is None:
-        return "WARNING: No execution plan created. Use plan(action='create', tasks=[...]) to create one."
+        if not PLAN_DECISION_MADE:
+            return "WARNING: No plan decision made. Use plan(action='create', tasks=[...]) or plan(action='skip', reason='...')."
+        return None
+    
+    if SIGNIFICANT_ACTIONS_COUNT >= 2:
+        return (
+            f"⚠️ WARNING: You performed {SIGNIFICANT_ACTIONS_COUNT} significant operations (edit/create/run) "
+            "but haven't updated the plan.\n"
+            "Call plan(action='update', task_id=X, status='completed') to mark finished tasks, "
+            "or plan(action='update', task_id=Y, status='in_progress') to start the next one."
+        )
     
     incomplete = [t for t in CURRENT_PLAN["tasks"] if t["status"] != "completed"]
     if not incomplete:
         return None
+    
+    in_progress = [t for t in incomplete if t["status"] == "in_progress"]
+    if in_progress and SIGNIFICANT_ACTIONS_COUNT >= 1:
+        task = in_progress[0]
+        return (
+            f"⚠️ Task [{task['id']}] '{task['desc']}' is in_progress. "
+            f"If you finished it, call plan(action='update', task_id={task['id']}, status='completed')."
+        )
     
     result = [f"WARNING: {len(incomplete)} task(s) still incomplete:"]
     for task in incomplete:
@@ -801,6 +889,19 @@ def format_tool_call(name: str, arguments: dict) -> str:
         return f'{name.upper()}({arguments})'
 
 def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
+    global PLAN_DECISION_MADE, SIGNIFICANT_ACTIONS_COUNT
+    
+    if name != "plan" and not PLAN_DECISION_MADE:
+        return False, (
+            "⚠️ BLOCKED: You must make a plan decision first.\n"
+            "Call plan(action='create', tasks=[...]) for multi-step tasks, "
+            "or plan(action='skip', reason='...') for simple tasks."
+        )
+    
+    significant_action_tools = ["edit_file", "create_file", "run_command"]
+    if name in significant_action_tools and CURRENT_PLAN is not None:
+        SIGNIFICANT_ACTIONS_COUNT += 1
+    
     if name == "search_context":
         return search_context(
             arguments.get("pattern"),
@@ -831,7 +932,8 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
             arguments.get("action"),
             arguments.get("tasks"),
             arguments.get("task_id"),
-            arguments.get("status")
+            arguments.get("status"),
+            arguments.get("reason")
         )
     elif name == "run_command":
         return run_command(

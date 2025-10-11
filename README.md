@@ -72,6 +72,20 @@ Or see `.tricode-settings.example.json` for reference.
 - `openai_base_url`: Custom API endpoint (optional, defaults to OpenAI's official API)
 - `openai_model`: Model to use (optional, defaults to gpt-4o-mini)
 
+### Environment Variable Override
+
+All configuration options can be overridden via environment variables, which take precedence over `settings.json`.
+
+Environment variable naming: `TRICODE_` + UPPERCASE config key
+
+```bash
+export TRICODE_OPENAI_API_KEY="sk-your-api-key"
+export TRICODE_OPENAI_BASE_URL="https://api.openai.com/v1"
+export TRICODE_OPENAI_MODEL="gpt-4o"
+```
+
+Priority: **Environment Variables > settings.json > Defaults**
+
 ## Usage
 
 ```bash
@@ -182,6 +196,20 @@ Or see `.tricode-settings.example.json` for reference.
 - `openai_api_key`: Your OpenAI API key (required)
 - `openai_base_url`: Custom API endpoint (optional, defaults to OpenAI's official API)
 - `openai_model`: Model to use (optional, defaults to gpt-4o-mini)
+
+### Environment Variable Override
+
+All configuration options can be overridden via environment variables, which take precedence over `settings.json`.
+
+Environment variable naming: `TRICODE_` + UPPERCASE config key
+
+```bash
+export TRICODE_OPENAI_API_KEY="sk-your-api-key"
+export TRICODE_OPENAI_BASE_URL="https://api.openai.com/v1"
+export TRICODE_OPENAI_MODEL="gpt-4o"
+```
+
+Priority: **Environment Variables > settings.json > Defaults**
 
 ## Usage
 

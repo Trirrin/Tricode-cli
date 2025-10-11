@@ -56,6 +56,20 @@ nano ~/.tricode/settings.json
 - `openai_base_url`：自定义 API 端点（可选，默认为 OpenAI 官方 API）
 - `openai_model`：所使用的模型（可选，默认为 gpt-4o-mini）
 
+### 环境变量覆盖
+
+所有配置项都可以通过环境变量覆盖，环境变量优先级高于 `settings.json`。
+
+环境变量命名规则：`TRICODE_` + 大写配置项名
+
+```bash
+export TRICODE_OPENAI_API_KEY="sk-your-api-key"
+export TRICODE_OPENAI_BASE_URL="https://api.openai.com/v1"
+export TRICODE_OPENAI_MODEL="gpt-4o"
+```
+
+优先级：**环境变量 > settings.json > 默认值**
+
 ## 使用方法
 
 ```bash

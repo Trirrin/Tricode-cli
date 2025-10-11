@@ -34,33 +34,33 @@ class HumanWriter(OutputWriter):
     
     def write_tool_call(self, name: str, arguments: dict, formatted: str):
         if name == "plan":
-            print(formatted)
+            print(formatted, flush=True)
         else:
-            print(f"  {formatted}")
+            print(f"  {formatted}", flush=True)
     
     def write_tool_result(self, name: str, success: bool, result: str, formatted: str):
         if name == "plan":
-            print(formatted)
+            print(formatted, flush=True)
         else:
-            print(f"  ↳ {formatted}")
+            print(f"  ↳ {formatted}", flush=True)
         
         if self.verbose:
-            print(f"  Full result:\n{result}")
+            print(f"  Full result:\n{result}", flush=True)
     
     def write_round(self, round_num: int):
         if self.verbose:
-            print(f"\n[Round {round_num}]")
+            print(f"\n[Round {round_num}]", flush=True)
     
     def write_reminder(self, message: str):
         if self.verbose:
-            print(f"\n[REMINDER] {message}\n")
+            print(f"\n[REMINDER] {message}\n", flush=True)
     
     def write_final(self, content: str):
-        print(content)
+        print(content, flush=True)
     
     def write_system(self, message: str):
         if self.verbose:
-            print(f"[{message}]")
+            print(f"[{message}]", flush=True)
 
 class JsonWriter(OutputWriter):
     def _write_json(self, obj: Dict[str, Any]):

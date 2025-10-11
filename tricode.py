@@ -71,7 +71,7 @@ Examples:
     )
     
     if result:
-        print(result)
+        print(result, flush=True)
 
 if __name__ == "__main__":
     main()

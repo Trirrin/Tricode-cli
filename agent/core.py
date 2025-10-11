@@ -19,7 +19,7 @@ def save_session(session_id: str, messages: list) -> None:
         with open(session_file, 'w', encoding='utf-8') as f:
             json.dump(messages, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"Warning: Failed to save session {session_id}: {e}")
+        print(f"Warning: Failed to save session {session_id}: {e}", flush=True)
 
 def load_session(session_id: str) -> list:
     session_file = get_session_dir() / f"{session_id}.json"
@@ -36,16 +36,16 @@ def list_conversations() -> None:
     session_dir = get_session_dir()
     
     if not session_dir.exists():
-        print("No conversations found.")
+        print("No conversations found.", flush=True)
         return
     
     session_files = sorted(session_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     
     if not session_files:
-        print("No conversations found.")
+        print("No conversations found.", flush=True)
         return
     
-    print(f"Available conversation sessions (stored in {session_dir}):\n")
+    print(f"Available conversation sessions (stored in {session_dir}):\n", flush=True)
     
     for session_file in session_files:
         session_id = session_file.stem
@@ -66,15 +66,15 @@ def list_conversations() -> None:
                 if len(first_prompt) > 60:
                     first_prompt = first_prompt[:57] + "..."
             
-            print(f"  {session_id}")
-            print(f"    Last modified: {time_str}")
-            print(f"    Messages: {msg_count}")
-            print(f"    First prompt: {first_prompt}")
-            print()
+            print(f"  {session_id}", flush=True)
+            print(f"    Last modified: {time_str}", flush=True)
+            print(f"    Messages: {msg_count}", flush=True)
+            print(f"    First prompt: {first_prompt}", flush=True)
+            print(flush=True)
             
         except Exception as e:
-            print(f"  {session_id} (error reading: {e})")
-            print()
+            print(f"  {session_id} (error reading: {e})", flush=True)
+            print(flush=True)
 
 def load_agents_md() -> str:
     agents_content = []
@@ -85,7 +85,7 @@ def load_agents_md() -> str:
             with open(local_path, 'r', encoding='utf-8') as f:
                 agents_content.append(f.read().strip())
         except Exception as e:
-            print(f"Warning: Failed to read {local_path}: {e}")
+            print(f"Warning: Failed to read {local_path}: {e}", flush=True)
     
     global_path = Path.home() / ".tricode" / "AGENTS.md"
     if global_path.exists():
@@ -93,7 +93,7 @@ def load_agents_md() -> str:
             with open(global_path, 'r', encoding='utf-8') as f:
                 agents_content.append(f.read().strip())
         except Exception as e:
-            print(f"Warning: Failed to read {global_path}: {e}")
+            print(f"Warning: Failed to read {global_path}: {e}", flush=True)
     
     return "\n\n".join(agents_content) if agents_content else ""
 

@@ -31,7 +31,7 @@ def save_plan_state(session_id: str, plan_data: dict) -> None:
         with open(plan_file, 'w', encoding='utf-8') as f:
             json.dump(plan_data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"Warning: Failed to save plan for session {session_id}: {e}")
+        print(f"Warning: Failed to save plan for session {session_id}: {e}", flush=True)
 
 def load_plan_state(session_id: str) -> Optional[dict]:
     if not session_id:
@@ -43,7 +43,7 @@ def load_plan_state(session_id: str) -> Optional[dict]:
         with open(plan_file, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
-        print(f"Warning: Failed to load plan for session {session_id}: {e}")
+        print(f"Warning: Failed to load plan for session {session_id}: {e}", flush=True)
         return None
 
 def set_session_id(session_id: str) -> None:

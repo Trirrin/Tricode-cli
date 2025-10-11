@@ -18,10 +18,40 @@ PLAN_DECISION_MADE = False
 SIGNIFICANT_ACTIONS_COUNT = 0
 LAST_PLAN_UPDATE_AT = 0
 
+WORK_DIR = None
+BYPASS_WORK_DIR_LIMIT = False
+
 def get_plan_dir() -> Path:
     plan_dir = Path.home() / ".tricode" / "plans"
     plan_dir.mkdir(parents=True, exist_ok=True)
     return plan_dir
+
+def set_work_dir(work_dir: str = None, bypass: bool = False) -> None:
+    global WORK_DIR, BYPASS_WORK_DIR_LIMIT
+    BYPASS_WORK_DIR_LIMIT = bypass
+    if work_dir:
+        WORK_DIR = os.path.realpath(work_dir)
+    else:
+        WORK_DIR = os.path.realpath(os.getcwd())
+
+def resolve_path(path: str) -> str:
+    expanded = os.path.expanduser(path)
+    if os.path.isabs(expanded):
+        return os.path.realpath(expanded)
+    else:
+        return os.path.realpath(os.path.join(WORK_DIR, expanded))
+
+def validate_path(path: str) -> Tuple[bool, str]:
+    if BYPASS_WORK_DIR_LIMIT:
+        return True, ""
+    
+    try:
+        real_path = os.path.realpath(path)
+        if not real_path.startswith(WORK_DIR + os.sep) and real_path != WORK_DIR:
+            return False, f"Access denied: {path} is outside work directory {WORK_DIR}"
+        return True, ""
+    except Exception as e:
+        return False, f"Path validation error: {str(e)}"
 
 def save_plan_state(session_id: str, plan_data: dict) -> None:
     if not session_id:
@@ -372,9 +402,14 @@ TOOLS_SCHEMA = [
 ]
 
 def search_context(pattern: str, path: str = ".") -> Tuple[bool, str]:
+    resolved_path = resolve_path(path)
+    valid, err_msg = validate_path(resolved_path)
+    if not valid:
+        return False, err_msg
+    
     try:
         result = subprocess.run(
-            ["rg", "-n", "--", pattern, path],
+            ["rg", "-n", "--", pattern, resolved_path],
             capture_output=True,
             text=True,
             timeout=10
@@ -386,7 +421,7 @@ def search_context(pattern: str, path: str = ".") -> Tuple[bool, str]:
         else:
             return False, f"Search error: {result.stderr}"
     except FileNotFoundError:
-        return _fallback_search(pattern, path)
+        return _fallback_search(pattern, resolved_path)
     except Exception as e:
         return False, f"Search failed: {str(e)}"
 
@@ -409,8 +444,13 @@ def _fallback_search(pattern: str, path: str) -> Tuple[bool, str]:
         return False, f"Fallback search failed: {str(e)}"
 
 def read_file(path: str, ranges: list = None) -> Tuple[bool, str]:
+    resolved_path = resolve_path(path)
+    valid, err_msg = validate_path(resolved_path)
+    if not valid:
+        return False, err_msg
+    
     try:
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(resolved_path, 'r', encoding='utf-8') as f:
             if ranges is None:
                 content = f.read()
             else:
@@ -423,16 +463,21 @@ def read_file(path: str, ranges: list = None) -> Tuple[bool, str]:
                 content = ''.join(selected_lines)
         return True, content
     except FileNotFoundError:
-        return False, f"File not found: {path}"
+        return False, f"File not found: {resolved_path}"
     except Exception as e:
         return False, f"Read failed: {str(e)}"
 
 def create_file(path: str, content: str) -> Tuple[bool, str]:
+    resolved_path = resolve_path(path)
+    valid, err_msg = validate_path(resolved_path)
+    if not valid:
+        return False, err_msg
+    
     try:
-        if os.path.exists(path):
-            return False, f"File already exists: {path}. Use edit_file to modify existing files."
+        if os.path.exists(resolved_path):
+            return False, f"File already exists: {resolved_path}. Use edit_file to modify existing files."
         
-        dir_path = os.path.dirname(path)
+        dir_path = os.path.dirname(resolved_path)
         if dir_path and not os.path.exists(dir_path):
             os.makedirs(dir_path)
         
@@ -445,14 +490,19 @@ def create_file(path: str, content: str) -> Tuple[bool, str]:
             tmp.write(content)
             tmp_path = tmp.name
         
-        os.rename(tmp_path, path)
-        return True, f"Successfully created {path}"
+        os.rename(tmp_path, resolved_path)
+        return True, f"Successfully created {resolved_path}"
     except Exception as e:
         return False, f"Create failed: {str(e)}"
 
 def edit_file(path: str, replacements: list) -> Tuple[bool, str]:
+    resolved_path = resolve_path(path)
+    valid, err_msg = validate_path(resolved_path)
+    if not valid:
+        return False, err_msg
+    
     try:
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(resolved_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
         
         sorted_replacements = sorted(replacements, key=lambda r: r["range"][0], reverse=True)
@@ -469,7 +519,7 @@ def edit_file(path: str, replacements: list) -> Tuple[bool, str]:
             
             lines[start-1:end] = [new_content]
         
-        dir_path = os.path.dirname(path)
+        dir_path = os.path.dirname(resolved_path)
         with tempfile.NamedTemporaryFile(
             mode='w',
             encoding='utf-8',
@@ -479,18 +529,23 @@ def edit_file(path: str, replacements: list) -> Tuple[bool, str]:
             tmp.writelines(lines)
             tmp_path = tmp.name
         
-        os.rename(tmp_path, path)
-        return True, f"Successfully edited {path}"
+        os.rename(tmp_path, resolved_path)
+        return True, f"Successfully edited {resolved_path}"
     except FileNotFoundError:
-        return False, f"File not found: {path}"
+        return False, f"File not found: {resolved_path}"
     except Exception as e:
         return False, f"Edit failed: {str(e)}"
 
 def list_directory(path: str = ".", show_hidden: bool = True) -> Tuple[bool, str]:
+    resolved_path = resolve_path(path)
+    valid, err_msg = validate_path(resolved_path)
+    if not valid:
+        return False, err_msg
+    
     try:
         cmd = ["ls", "-la"] if show_hidden else ["ls", "-l"]
         result = subprocess.run(
-            cmd + [path],
+            cmd + [resolved_path],
             capture_output=True,
             text=True,
             timeout=5
@@ -500,9 +555,9 @@ def list_directory(path: str = ".", show_hidden: bool = True) -> Tuple[bool, str
         else:
             return False, f"ls command error: {result.stderr}"
     except FileNotFoundError:
-        return _fallback_list_directory(path, show_hidden)
+        return _fallback_list_directory(resolved_path, show_hidden)
     except Exception as e:
-        return _fallback_list_directory(path, show_hidden)
+        return _fallback_list_directory(resolved_path, show_hidden)
 
 def _fallback_list_directory(path: str, show_hidden: bool = True) -> Tuple[bool, str]:
     try:

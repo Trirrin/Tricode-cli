@@ -59,6 +59,19 @@ Examples:
         help="List all available conversation sessions"
     )
     
+    parser.add_argument(
+        "--work-dir",
+        type=str,
+        metavar="PATH",
+        help="Set working directory (default: current directory). Agent can only access files under this path."
+    )
+    
+    parser.add_argument(
+        "--bypass-work-directory-limit",
+        action="store_true",
+        help="Allow access to files outside the working directory"
+    )
+    
     args = parser.parse_args()
     
     if args.list_conversations:
@@ -80,7 +93,9 @@ Examples:
         stdio_mode=args.stdio,
         override_system_prompt=args.override_system_prompt,
         resume_session_id=args.resume,
-        allowed_tools=allowed_tools
+        allowed_tools=allowed_tools,
+        work_dir=args.work_dir,
+        bypass_work_dir_limit=args.bypass_work_directory_limit
     )
     
     if result:

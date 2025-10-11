@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 from datetime import datetime
 from openai import OpenAI
-from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, get_plan_reminder, get_plan_final_reminder, set_session_id, restore_plan
+from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, get_plan_reminder, get_plan_final_reminder, set_session_id, restore_plan, set_work_dir, WORK_DIR
 from .config import load_config, CONFIG_FILE
 from .output import HumanWriter, JsonWriter
 
@@ -196,7 +196,9 @@ def build_tools_description(allowed_tools: list = None) -> str:
     
     return "\n".join(lines)
 
-def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, override_system_prompt: bool = False, resume_session_id: str = None, allowed_tools: list = None) -> str:
+def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, override_system_prompt: bool = False, resume_session_id: str = None, allowed_tools: list = None, work_dir: str = None, bypass_work_dir_limit: bool = False) -> str:
+    set_work_dir(work_dir, bypass_work_dir_limit)
+    
     config = load_config()
     
     api_key = config.get("openai_api_key")
@@ -242,6 +244,8 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
             "You are Tricode, a powerful autonomous agent running in terminal. "
             "You are a capable autonomous agent with access to file system tools. "
             "Your goal is to complete user requests efficiently and intelligently.\n\n"
+            f"WORKING DIRECTORY: {WORK_DIR}\n"
+            f"All relative paths (like '.', 'file.txt', 'subdir/') are relative to this directory.\n\n"
             f"{tools_desc}\n\n"
             "CRITICAL: PLAN TOOL MUST BE YOUR FIRST TOOL CALL:\n"
             "Before using ANY other tool, you MUST call plan with one of these actions:\n\n"

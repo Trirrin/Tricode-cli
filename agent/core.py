@@ -240,12 +240,18 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
             any(t in allowed_tools for t in ["start_session", "send_input", "read_output", "close_session", "list_sessions"])
         )
         
-        default_system_prompt = (
+        base_identity = (
             "You are Tricode, a powerful autonomous agent running in terminal. "
             "You are a capable autonomous agent with access to file system tools. "
             "Your goal is to complete user requests efficiently and intelligently.\n\n"
+        )
+        
+        work_dir_section = (
             f"WORKING DIRECTORY: {WORK_DIR}\n"
             f"All relative paths (like '.', 'file.txt', 'subdir/') are relative to this directory.\n\n"
+        )
+        
+        tools_section = (
             f"{tools_desc}\n\n"
             "CRITICAL: PLAN TOOL MUST BE YOUR FIRST TOOL CALL:\n"
             "Before using ANY other tool, you MUST call plan with one of these actions:\n\n"
@@ -272,7 +278,7 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
         )
         
         if has_session_tools:
-            default_system_prompt += (
+            tools_section += (
                 "INTERACTIVE SESSION USAGE:\n"
                 "For persistent interactive processes (SSH, Python REPL, Docker exec):\n"
                 "1. Use start_session to launch the process - returns a session_id\n"
@@ -298,7 +304,7 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
             principles.append(f"{len(principles) + 1}. Verify before acting: Read files before modifying them")
         principles.append(f"{len(principles) + 1}. Track progress: Update plan status after each task completion")
         
-        default_system_prompt += "Core principles:\n" + "\n".join(principles) + "\n\n"
+        tools_section += "Core principles:\n" + "\n".join(principles) + "\n\n"
         
         if has_search or has_read or has_edit:
             examples = ["Examples of proactive behavior:"]
@@ -307,9 +313,9 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
                 examples.append("- Unclear request? Search to understand the codebase structure")
             if has_read and has_edit:
                 examples.append("- Before editing? Read the file first to understand context")
-            default_system_prompt += "\n".join(examples) + "\n\n"
+            tools_section += "\n".join(examples) + "\n\n"
         
-        default_system_prompt += (
+        tools_section += (
             "Never give up immediately when encountering errors. Try different approaches.\n\n"
             "IMPORTANT: If the user's request cannot be completed with your available tools, "
             "clearly tell them that the task is not possible with the current tool limitations. "
@@ -318,13 +324,12 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
         
         agents_md_content = load_agents_md()
         
-        if agents_md_content:
-            if override_system_prompt:
-                system_prompt = agents_md_content
-            else:
-                system_prompt = default_system_prompt + "\n\n" + agents_md_content
+        if agents_md_content and override_system_prompt:
+            system_prompt = agents_md_content + "\n\n" + work_dir_section + tools_section
+        elif agents_md_content:
+            system_prompt = base_identity + work_dir_section + tools_section + "\n\n" + agents_md_content
         else:
-            system_prompt = default_system_prompt
+            system_prompt = base_identity + work_dir_section + tools_section
         
         messages = [
             {"role": "system", "content": system_prompt},

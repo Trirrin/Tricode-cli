@@ -9,6 +9,8 @@
 - **写入文件**：写入或修改文件
 - **运行命令**：执行 Shell 命令
 - **交互式会话**：管理持久化 Shell 会话（SSH、Python REPL 等）
+- **网页搜索**：使用 DuckDuckGo 进行网页搜索，带有速率限制和重试机制
+- **获取网页**：获取并转换网页内容为 Markdown 格式，包含安全检查
 - **任务规划**：将复杂任务分解为可管理的步骤
 - **对话历史**：恢复之前的会话并保持上下文
 - **工具白名单**：限制 Agent 使用特定操作以提升安全性
@@ -91,7 +93,7 @@ export TRICODE_OPENAI_MODEL="gpt-4o"
 - `-v, --verbose`：显示详细执行日志
 - `--stdio`：以 JSON 格式输出所有消息，便于程序化集成
 - `--tools <list>`：逗号分隔的允许工具列表（例如 `read_file,search_context`）
-  - 可用工具：`search_context`、`read_file`、`create_file`、`edit_file`、`list_directory`、`run_command`、`plan`、`start_session`、`send_input`、`read_output`、`close_session`、`list_sessions`
+  - 可用工具：`search_context`、`read_file`、`create_file`、`edit_file`、`list_directory`、`run_command`、`plan`、`start_session`、`send_input`、`read_output`、`close_session`、`list_sessions`、`web_search`、`fetch_url`
   - 如果未指定，则所有工具都可用
   - 注意：`plan` 工具会自动包含（Agent 运行必需）
   - Agent 只能看到和使用白名单内的工具；系统提示词会动态调整

@@ -9,6 +9,8 @@ An autonomous AI-powered command-line agent for file operations, powered by Open
 - **Write File**: Write or modify files
 - **Run Commands**: Execute shell commands
 - **Interactive Sessions**: Manage persistent shell sessions (SSH, Python REPL, etc.)
+- **Web Search**: Search the web using DuckDuckGo with rate limiting and retry logic
+- **Fetch URL**: Retrieve and convert web content to Markdown format with security checks
 - **Task Planning**: Break down complex tasks into manageable steps
 - **Conversation History**: Resume previous sessions and maintain context
 - **Tool Whitelisting**: Restrict agent to specific operations for safety
@@ -91,7 +93,7 @@ Priority: **Environment Variables > settings.json > Defaults**
 - `-v, --verbose`: Show detailed execution logs
 - `--stdio`: Output all messages in JSON format for programmatic integration
 - `--tools <list>`: Comma-separated list of allowed tools (e.g., `read_file,search_context`)
-  - Available tools: `search_context`, `read_file`, `create_file`, `edit_file`, `list_directory`, `run_command`, `plan`, `start_session`, `send_input`, `read_output`, `close_session`, `list_sessions`
+  - Available tools: `search_context`, `read_file`, `create_file`, `edit_file`, `list_directory`, `run_command`, `plan`, `start_session`, `send_input`, `read_output`, `close_session`, `list_sessions`, `web_search`, `fetch_url`
   - If not specified, all tools are available
   - Note: `plan` tool is automatically included (required for agent operation)
   - Agent only sees and uses whitelisted tools; system prompt adapts dynamically

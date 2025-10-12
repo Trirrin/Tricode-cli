@@ -2,6 +2,7 @@
 
 import argparse
 from agent import run_agent, list_conversations
+from agent.tui import run_tui
 
 def main():
     parser = argparse.ArgumentParser(
@@ -72,10 +73,32 @@ Examples:
         help="Allow access to files outside the working directory"
     )
     
+    parser.add_argument(
+        "--tui",
+        action="store_true",
+        help="Launch interactive TUI (Text User Interface) mode"
+    )
+    
     args = parser.parse_args()
     
     if args.list_conversations:
         list_conversations()
+        return
+    
+    if args.tui:
+        allowed_tools = None
+        if args.tools:
+            allowed_tools = [t.strip() for t in args.tools.split(',') if t.strip()]
+            if 'plan' not in allowed_tools:
+                allowed_tools.insert(0, 'plan')
+        
+        run_tui(
+            work_dir=args.work_dir,
+            bypass_work_dir_limit=args.bypass_work_directory_limit,
+            allowed_tools=allowed_tools,
+            override_system_prompt=args.override_system_prompt,
+            resume_session_id=args.resume
+        )
         return
     
     if not args.prompt:

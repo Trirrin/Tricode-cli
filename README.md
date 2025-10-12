@@ -82,6 +82,39 @@ Priority: **Environment Variables > settings.json > Defaults**
 
 ## Usage
 
+### TUI Mode (Interactive)
+
+Launch the interactive Text User Interface for continuous conversations:
+
+```bash
+./tricode.py --tui
+```
+
+Features:
+- **Real-time interaction**: Type messages and see agent responses instantly
+- **Session management**: Create new sessions or continue existing ones
+- **Keyboard shortcuts**:
+  - `Enter`: Send message
+  - `\` + `Enter`: Insert newline (shell-style line continuation)
+  - `Ctrl+C`: Quit application
+  - `Ctrl+N`: Create new session
+  - `Ctrl+L`: Clear output
+- **Visual feedback**: Color-coded tool calls and results
+
+**Example usage**:
+```bash
+# Start TUI with default settings
+./tricode.py --tui
+
+# Start TUI with restricted tools
+./tricode.py --tui --tools "read_file,search_context"
+
+# Resume a session in TUI mode
+./tricode.py --tui --resume abc123
+```
+
+### CLI Mode (Single Command)
+
 ```bash
 ./tricode.py "Find all TODO comments in the codebase"
 ./tricode.py "Read config.py and summarize the configuration"
@@ -90,6 +123,7 @@ Priority: **Environment Variables > settings.json > Defaults**
 
 ### Command-Line Options
 
+- `--tui`: Launch interactive TUI (Text User Interface) mode
 - `-v, --verbose`: Show detailed execution logs
 - `--stdio`: Output all messages in JSON format for programmatic integration
 - `--tools <list>`: Comma-separated list of allowed tools (e.g., `read_file,search_context`)

@@ -82,6 +82,39 @@ export TRICODE_OPENAI_MODEL="gpt-4o"
 
 ## 使用方法
 
+### TUI 模式（交互式）
+
+启动交互式文本用户界面进行持续对话：
+
+```bash
+./tricode.py --tui
+```
+
+功能特性：
+- **实时交互**：输入消息并即时查看 Agent 响应
+- **会话管理**：创建新会话或继续现有会话
+- **快捷键**：
+  - `Enter`：发送消息
+  - `\` + `Enter`：插入换行符（Shell 风格的行延续）
+  - `Ctrl+C`：退出应用
+  - `Ctrl+N`：创建新会话
+  - `Ctrl+L`：清空输出
+- **视觉反馈**：彩色显示工具调用和结果
+
+**使用示例**：
+```bash
+# 使用默认设置启动 TUI
+./tricode.py --tui
+
+# 使用受限工具启动 TUI
+./tricode.py --tui --tools "read_file,search_context"
+
+# 在 TUI 模式下恢复会话
+./tricode.py --tui --resume abc123
+```
+
+### CLI 模式（单次命令）
+
 ```bash
 ./tricode.py "Find all TODO comments in the codebase"
 ./tricode.py "Read config.py and summarize the configuration"
@@ -90,6 +123,7 @@ export TRICODE_OPENAI_MODEL="gpt-4o"
 
 ### 命令行参数
 
+- `--tui`：启动交互式 TUI（文本用户界面）模式
 - `-v, --verbose`：显示详细执行日志
 - `--stdio`：以 JSON 格式输出所有消息，便于程序化集成
 - `--tools <list>`：逗号分隔的允许工具列表（例如 `read_file,search_context`）

@@ -148,14 +148,103 @@ class SessionListScreen(ModalScreen):
         self.dismiss(None)
 
 
+class CheckpointListScreen(ModalScreen):
+    CSS = """
+    CheckpointListScreen {
+        align: center middle;
+    }
+    
+    #checkpoint_dialog {
+        width: 100;
+        height: 20;
+        border: solid #ff8c00;
+        background: #3a3228;
+    }
+    
+    #checkpoint_title {
+        width: 100%;
+        height: 1;
+        background: #ff8c00;
+        color: #2b2420;
+        content-align: center middle;
+    }
+    
+    ListView {
+        height: 1fr;
+        background: #3a3228;
+    }
+    
+    ListItem {
+        background: #3a3228;
+        color: #fdf5e6;
+    }
+    
+    ListItem.--highlight {
+        background: #ff8c00;
+        color: #2b2420;
+    }
+    """
+    
+    BINDINGS = [
+        ("escape", "dismiss", "Cancel"),
+    ]
+    
+    def __init__(self, checkpoints: list):
+        super().__init__()
+        self.checkpoints = checkpoints
+    
+    def compose(self) -> ComposeResult:
+        with Container(id="checkpoint_dialog"):
+            yield Label("Select Checkpoint (Enter to rollback, Esc to cancel)", id="checkpoint_title")
+            
+            with ListView():
+                for idx, checkpoint in enumerate(self.checkpoints):
+                    preview = checkpoint if len(checkpoint) <= 80 else checkpoint[:77] + "..."
+                    label_text = f"#{idx + 1}: {preview}"
+                    yield ListItem(Label(label_text))
+    
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        selected_index = event.list_view.index
+        if 0 <= selected_index < len(self.checkpoints):
+            self.dismiss(selected_index)
+    
+    def action_dismiss(self) -> None:
+        self.dismiss(None)
+
+
 class CustomTextArea(TextArea):
     class Submitted(Message):
         def __init__(self, text: str) -> None:
             self.text = text
             super().__init__()
     
+    class CheckpointRequested(Message):
+        pass
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.last_esc_time = 0.0
+        self.double_click_threshold = 0.5
+    
     def _on_key(self, event: events.Key) -> None:
-        if event.key == "enter":
+        if event.key == "escape":
+            import time
+            current_time = time.time()
+            time_since_last_esc = current_time - self.last_esc_time
+            
+            if time_since_last_esc < self.double_click_threshold:
+                event.prevent_default()
+                event.stop()
+                self.post_message(self.CheckpointRequested())
+                self.last_esc_time = 0.0
+                return
+            else:
+                self.last_esc_time = current_time
+                event.prevent_default()
+                event.stop()
+                self.clear()
+                return
+        elif event.key == "enter":
             cursor_row, cursor_col = self.cursor_location
             
             if cursor_col > 0:
@@ -434,6 +523,8 @@ class TricodeApp(App):
                 set_session_id(self.session_id)
                 restore_plan(self.session_id)
                 self.session = AgentSession(self.session_id, messages, self.client, self.model, allowed_tools)
+                self.message_history = [msg.get("content") for msg in messages if msg.get("role") == "user"]
+                self.history_index = -1
             except Exception as e:
                 self.session_id = str(uuid.uuid4())[:8]
                 set_session_id(self.session_id)
@@ -444,6 +535,8 @@ class TricodeApp(App):
                     self.model, 
                     allowed_tools
                 )
+                self.message_history = []
+                self.history_index = -1
         else:
             self.session_id = str(uuid.uuid4())[:8]
             set_session_id(self.session_id)
@@ -454,6 +547,8 @@ class TricodeApp(App):
                 self.model, 
                 allowed_tools
             )
+            self.message_history = []
+            self.history_index = -1
     
     def _create_initial_messages(self) -> list:
         tools_desc = build_tools_description(self.allowed_tools)
@@ -514,12 +609,102 @@ class TricodeApp(App):
     async def on_custom_text_area_submitted(self, event: CustomTextArea.Submitted) -> None:
         await self._send_message()
     
+    def on_custom_text_area_checkpoint_requested(self, event: CustomTextArea.CheckpointRequested) -> None:
+        checkpoints = []
+        for msg in self.session.messages:
+            if msg.get("role") == "user":
+                checkpoints.append(msg.get("content", ""))
+        
+        if not checkpoints:
+            return
+        
+        def handle_checkpoint_selection(selected_index: int | None) -> None:
+            if selected_index is not None:
+                checkpoint_msg_idx = 0
+                cut_index = -1
+                selected_user_content = ""
+                
+                for idx, msg in enumerate(self.session.messages):
+                    if msg.get("role") == "user":
+                        if checkpoint_msg_idx == selected_index:
+                            cut_index = idx
+                            selected_user_content = msg.get("content", "")
+                            break
+                        checkpoint_msg_idx += 1
+                
+                if cut_index >= 1:
+                    self.session.messages = self.session.messages[:cut_index]
+                    save_session(self.session_id, self.session.messages)
+                    
+                    input_widget = self.query_one("#input", CustomTextArea)
+                    input_widget.text = selected_user_content
+                    input_widget.move_cursor((0, len(selected_user_content)))
+                    
+                    self.message_history = [msg.get("content") for msg in self.session.messages if msg.get("role") == "user"]
+                    self.history_index = -1
+                    
+                    hist_input, hist_output, hist_total = self.session.calculate_history_tokens()
+                    self.session.input_tokens = hist_input
+                    self.session.output_tokens = hist_output
+                    self.session.total_tokens = hist_total
+                    
+                    output = self.query_one("#output", RichLog)
+                    output.clear()
+                    output.write(f"[bold #ff8c00]Rolled back before checkpoint #{selected_index + 1}[/bold #ff8c00]")
+                    output.write(f"[dim]Message restored to input box for editing[/dim]")
+                    output.write(f"Session ID: {self.session_id}")
+                    output.write("")
+                    
+                    for msg in self.session.messages:
+                        role = msg.get("role")
+                        content = msg.get("content")
+                        
+                        if role == "system":
+                            continue
+                        elif role == "user":
+                            output.write(f"[bold #ffa500]You:[/bold #ffa500] {content}")
+                            output.write("")
+                        elif role == "assistant":
+                            tool_calls = msg.get("tool_calls")
+                            if tool_calls:
+                                for tc in tool_calls:
+                                    func_name = tc.get("function", {}).get("name", "unknown")
+                                    try:
+                                        func_args = json.loads(tc.get("function", {}).get("arguments", "{}"))
+                                    except json.JSONDecodeError:
+                                        func_args = {}
+                                    formatted_call = format_tool_call(func_name, func_args)
+                                    output.write(f"[#2b2420 on #ffb347] {formatted_call} [/]")
+                            if content:
+                                output.write("[bold #ff8c00]Agent:[/bold #ff8c00]")
+                                md = Markdown(content)
+                                output.write(md)
+                                output.write("")
+                        elif role == "tool":
+                            tool_content = content[:200] + "..." if len(content) > 200 else content
+                            output.write(f"[#fdf5e6]↳ {tool_content}[/#fdf5e6]")
+                            output.write("")
+                    
+                    output.write(f"[dim]--- Rolled back, {len(self.session.messages)} messages remaining ---[/dim]")
+                    output.write("")
+                    
+                    token_stats = self.query_one("#token_stats", Static)
+                    token_text = f"↑ {hist_input} tokens  ↓ {hist_output} tokens  total: {hist_total} tokens"
+                    token_stats.update(token_text)
+                    
+                    input_widget.focus()
+        
+        self.push_screen(CheckpointListScreen(checkpoints), handle_checkpoint_selection)
+    
     async def _send_message(self) -> None:
         input_widget = self.query_one("#input", CustomTextArea)
         message = input_widget.text.strip()
         
         if not message:
             return
+        
+        self.message_history.append(message)
+        self.history_index = -1
         
         input_widget.clear()
         output = self.query_one("#output", RichLog)
@@ -595,6 +780,9 @@ class TricodeApp(App):
             self.allowed_tools
         )
         
+        self.message_history = []
+        self.history_index = -1
+        
         output = self.query_one("#output", RichLog)
         output.clear()
         output.write(f"[bold #ff8c00]New Session Created[/bold #ff8c00]")
@@ -634,6 +822,9 @@ class TricodeApp(App):
                     self.session.input_tokens = hist_input
                     self.session.output_tokens = hist_output
                     self.session.total_tokens = hist_total
+                    
+                    self.message_history = [msg.get("content") for msg in messages if msg.get("role") == "user"]
+                    self.history_index = -1
                     
                     output = self.query_one("#output", RichLog)
                     output.clear()

@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import requests
 import html2text
 from bs4 import BeautifulSoup
+from ddgs import DDGS
 
 CURRENT_PLAN = None
 CURRENT_SESSION_ID = None
@@ -25,6 +26,8 @@ LAST_PLAN_UPDATE_AT = 0
 
 WORK_DIR = None
 BYPASS_WORK_DIR_LIMIT = False
+LAST_WEB_SEARCH_TIME = 0
+WEB_SEARCH_RATE_LIMIT = 1.5
 
 def get_plan_dir() -> Path:
     plan_dir = Path.home() / ".tricode" / "plans"
@@ -423,6 +426,28 @@ TOOLS_SCHEMA = [
                     }
                 },
                 "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web using DuckDuckGo and return a list of results with titles, URLs, and snippets",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query string"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return",
+                        "default": 5
+                    }
+                },
+                "required": ["query"]
             }
         }
     }
@@ -993,6 +1018,60 @@ def fetch_url(url: str, timeout: int = 10) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Failed to fetch URL: {str(e)}"
 
+def web_search(query: str, max_results: int = 5) -> Tuple[bool, str]:
+    global LAST_WEB_SEARCH_TIME
+    
+    if max_results < 1:
+        return False, "max_results must be at least 1"
+    if max_results > 20:
+        max_results = 20
+    
+    elapsed = time.time() - LAST_WEB_SEARCH_TIME
+    if elapsed < WEB_SEARCH_RATE_LIMIT:
+        wait_time = WEB_SEARCH_RATE_LIMIT - elapsed
+        time.sleep(wait_time)
+    
+    max_retries = 3
+    base_delay = 2
+    
+    for attempt in range(max_retries):
+        try:
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=max_results))
+            
+            LAST_WEB_SEARCH_TIME = time.time()
+            
+            if not results:
+                return True, "No results found"
+            
+            formatted = []
+            for i, result in enumerate(results, 1):
+                title = result.get('title', 'No title')
+                url = result.get('href', 'No URL')
+                snippet = result.get('body', 'No description')
+                formatted.append(f"[{i}] {title}\n    URL: {url}\n    {snippet}\n")
+            
+            return True, "\n".join(formatted)
+            
+        except Exception as e:
+            error_str = str(e).lower()
+            
+            if 'ratelimit' in error_str or '429' in error_str or '202' in error_str:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    time.sleep(delay)
+                    continue
+                else:
+                    return False, (
+                        f"⚠️ Rate limit exceeded after {max_retries} retries. "
+                        "DuckDuckGo is temporarily blocking requests. "
+                        "Please wait a few minutes before searching again."
+                    )
+            else:
+                return False, f"Search failed: {str(e)}"
+    
+    return False, "Search failed: Maximum retries exceeded"
+
 def get_plan_reminder() -> str:
     if CURRENT_PLAN is None:
         if not PLAN_DECISION_MADE:
@@ -1054,22 +1133,26 @@ def format_tool_call(name: str, arguments: dict) -> str:
         return f'RUN({command})'
     elif name == "start_session":
         command = arguments.get("command", "")
-        return f'START_SESSION({command})'
+        return f'START SESSION({command})'
     elif name == "send_input":
         sid = arguments.get("session_id", "")
         text = arguments.get("input_text", "")
-        return f'SEND({sid}, "{text}")'
+        return f'SEND TO SESSION({sid}, "{text}")'
     elif name == "read_output":
         sid = arguments.get("session_id", "")
-        return f'READ_OUTPUT({sid})'
+        return f'READ SESSTION OUTPUT({sid})'
     elif name == "close_session":
         sid = arguments.get("session_id", "")
-        return f'CLOSE_SESSION({sid})'
+        return f'CLOSE SESSION({sid})'
     elif name == "list_sessions":
-        return 'LIST_SESSIONS()'
+        return 'LIST SESSIONS()'
     elif name == "fetch_url":
         url = arguments.get("url", "")
-        return f'FETCH_URL("{url}")'
+        return f'FETCH URL("{url}")'
+    elif name == "web_search":
+        query = arguments.get("query", "")
+        max_results = arguments.get("max_results", 5)
+        return f'WEB SEARCH("{query}", max={max_results})'
     else:
         return f'{name.upper()}({arguments})'
 
@@ -1150,6 +1233,11 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
         return fetch_url(
             arguments.get("url"),
             arguments.get("timeout", 10)
+        )
+    elif name == "web_search":
+        return web_search(
+            arguments.get("query"),
+            arguments.get("max_results", 5)
         )
     else:
         return False, f"Unknown tool: {name}"

@@ -262,6 +262,12 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
             "Your goal is to complete user requests efficiently and intelligently.\n\n"
         )
         
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
+        time_section = (
+            f"CURRENT LOCAL TIME: {current_time}\n"
+            f"Use this timestamp when processing time-related requests.\n\n"
+        )
+        
         work_dir_section = (
             f"WORKING DIRECTORY: {WORK_DIR}\n"
             f"All relative paths (like '.', 'file.txt', 'subdir/') are relative to this directory.\n\n"
@@ -341,11 +347,11 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
         agents_md_content = load_agents_md()
         
         if agents_md_content and override_system_prompt:
-            system_prompt = agents_md_content + "\n\n" + work_dir_section + tools_section
+            system_prompt = time_section + work_dir_section + tools_section + "\n\n" + agents_md_content
         elif agents_md_content:
-            system_prompt = base_identity + work_dir_section + tools_section + "\n\n" + agents_md_content
+            system_prompt = base_identity + time_section + work_dir_section + tools_section + "\n\n" + agents_md_content
         else:
-            system_prompt = base_identity + work_dir_section + tools_section
+            system_prompt = base_identity + time_section + work_dir_section + tools_section
         
         messages = [
             {"role": "system", "content": system_prompt},

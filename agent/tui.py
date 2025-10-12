@@ -7,16 +7,145 @@ from typing import Iterator
 from openai import OpenAI
 import tiktoken
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, TextArea, RichLog, Static
+from textual.widgets import Header, Footer, TextArea, RichLog, Static, ListView, ListItem, Label
 from textual.containers import Container, Vertical
 from textual.binding import Binding
 from textual import events
 from textual.message import Message
+from textual.screen import ModalScreen
 from rich.markdown import Markdown
 from rich.text import Text
 from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, set_session_id, set_work_dir, restore_plan
 from .config import load_config
 from .core import load_session, save_session, get_session_dir, filter_tools_schema, build_tools_description, load_agents_md, format_tool_result, call_openai_with_retry
+
+
+def get_available_sessions() -> list:
+    session_dir = get_session_dir()
+    if not session_dir.exists():
+        return []
+    
+    session_files = sorted(session_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    sessions = []
+    
+    try:
+        encoding = tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        encoding = None
+    
+    for session_file in session_files:
+        session_id = session_file.stem
+        try:
+            with open(session_file, 'r', encoding='utf-8') as f:
+                messages = json.load(f)
+            
+            mtime = datetime.fromtimestamp(session_file.stat().st_mtime)
+            time_str = mtime.strftime("%Y-%m-%d %H:%M:%S")
+            
+            user_messages = [m for m in messages if m.get("role") == "user"]
+            msg_count = len(messages)
+            
+            first_prompt = "N/A"
+            if user_messages:
+                first_prompt = user_messages[0].get("content", "N/A")
+                if len(first_prompt) > 60:
+                    first_prompt = first_prompt[:57] + "..."
+            
+            total_tokens = 0
+            if encoding:
+                for message in messages:
+                    role = message.get("role")
+                    content = message.get("content", "")
+                    
+                    if content:
+                        total_tokens += len(encoding.encode(str(content)))
+                    total_tokens += 4
+                    
+                    if role == "assistant":
+                        tool_calls = message.get("tool_calls", [])
+                        for tc in tool_calls:
+                            func_name = tc.get("function", {}).get("name", "")
+                            func_args = tc.get("function", {}).get("arguments", "")
+                            if func_name:
+                                total_tokens += len(encoding.encode(func_name))
+                            if func_args:
+                                total_tokens += len(encoding.encode(func_args))
+            
+            sessions.append({
+                "id": session_id,
+                "time": time_str,
+                "msg_count": msg_count,
+                "first_prompt": first_prompt,
+                "total_tokens": total_tokens
+            })
+        except Exception:
+            pass
+    
+    return sessions
+
+
+class SessionListScreen(ModalScreen):
+    CSS = """
+    SessionListScreen {
+        align: center middle;
+    }
+    
+    #session_dialog {
+        width: 100;
+        height: 20;
+        border: solid #ff8c00;
+        background: #3a3228;
+    }
+    
+    #session_title {
+        width: 100%;
+        height: 1;
+        background: #ff8c00;
+        color: #2b2420;
+        content-align: center middle;
+    }
+    
+    ListView {
+        height: 1fr;
+        background: #3a3228;
+    }
+    
+    ListItem {
+        background: #3a3228;
+        color: #fdf5e6;
+    }
+    
+    ListItem.--highlight {
+        background: #ff8c00;
+        color: #2b2420;
+    }
+    """
+    
+    BINDINGS = [
+        ("escape", "dismiss", "Cancel"),
+    ]
+    
+    def __init__(self, sessions: list):
+        super().__init__()
+        self.sessions = sessions
+    
+    def compose(self) -> ComposeResult:
+        with Container(id="session_dialog"):
+            yield Label("Resume Session (Enter to select, Esc to cancel)", id="session_title")
+            
+            with ListView():
+                for session in self.sessions:
+                    label_text = f"{session['id']} | {session['time']} | {session['msg_count']} msgs | {session['total_tokens']} tokens | {session['first_prompt']}"
+                    yield ListItem(Label(label_text))
+    
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        selected_index = event.list_view.index
+        if 0 <= selected_index < len(self.sessions):
+            selected_session = self.sessions[selected_index]
+            self.dismiss(selected_session["id"])
+    
+    def action_dismiss(self) -> None:
+        self.dismiss(None)
 
 
 class CustomTextArea(TextArea):
@@ -78,6 +207,34 @@ class AgentSession:
                     num_tokens -= 1
         num_tokens += 2
         return num_tokens
+    
+    def calculate_history_tokens(self) -> tuple[int, int, int]:
+        input_tokens = 0
+        output_tokens = 0
+        
+        for message in self.messages:
+            role = message.get("role")
+            content = message.get("content", "")
+            
+            if role in ["system", "user", "tool"]:
+                if content:
+                    input_tokens += len(self.encoding.encode(str(content)))
+                input_tokens += 4
+            elif role == "assistant":
+                if content:
+                    output_tokens += len(self.encoding.encode(str(content)))
+                tool_calls = message.get("tool_calls", [])
+                for tc in tool_calls:
+                    func_name = tc.get("function", {}).get("name", "")
+                    func_args = tc.get("function", {}).get("arguments", "")
+                    if func_name:
+                        output_tokens += len(self.encoding.encode(func_name))
+                    if func_args:
+                        output_tokens += len(self.encoding.encode(func_args))
+                output_tokens += 4
+        
+        total_tokens = input_tokens + output_tokens
+        return input_tokens, output_tokens, total_tokens
         
     def send_message(self, content: str) -> Iterator[dict]:
         self.messages.append({"role": "user", "content": content})
@@ -244,6 +401,7 @@ class TricodeApp(App):
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit"),
         Binding("ctrl+n", "new_session", "New Session"),
+        Binding("ctrl+r", "resume_session", "Resume"),
         Binding("ctrl+l", "clear_output", "Clear"),
     ]
     
@@ -448,6 +606,85 @@ class TricodeApp(App):
         token_stats.update("↑ 0 tokens  ↓ 0 tokens  total: 0 tokens")
         
         self.query_one("#input", CustomTextArea).focus()
+    
+    def action_resume_session(self) -> None:
+        sessions = get_available_sessions()
+        if not sessions:
+            output = self.query_one("#output", RichLog)
+            output.write("[bold red]No sessions available to resume[/bold red]")
+            return
+        
+        def handle_session_selection(selected_session_id: str | None) -> None:
+            if selected_session_id:
+                try:
+                    messages = load_session(selected_session_id)
+                    self.session_id = selected_session_id
+                    set_session_id(self.session_id)
+                    restore_plan(self.session_id)
+                    
+                    self.session = AgentSession(
+                        self.session_id,
+                        messages,
+                        self.client,
+                        self.model,
+                        self.allowed_tools
+                    )
+                    
+                    hist_input, hist_output, hist_total = self.session.calculate_history_tokens()
+                    self.session.input_tokens = hist_input
+                    self.session.output_tokens = hist_output
+                    self.session.total_tokens = hist_total
+                    
+                    output = self.query_one("#output", RichLog)
+                    output.clear()
+                    output.write(f"[bold #ff8c00]Session Resumed[/bold #ff8c00]")
+                    output.write(f"Session ID: {self.session_id}")
+                    output.write(f"[dim]Press Enter to send, backslash+Enter for newline[/dim]")
+                    output.write("")
+                    
+                    for msg in messages:
+                        role = msg.get("role")
+                        content = msg.get("content")
+                        
+                        if role == "system":
+                            continue
+                        elif role == "user":
+                            output.write(f"[bold #ffa500]You:[/bold #ffa500] {content}")
+                            output.write("")
+                        elif role == "assistant":
+                            tool_calls = msg.get("tool_calls")
+                            if tool_calls:
+                                for tc in tool_calls:
+                                    func_name = tc.get("function", {}).get("name", "unknown")
+                                    try:
+                                        func_args = json.loads(tc.get("function", {}).get("arguments", "{}"))
+                                    except json.JSONDecodeError:
+                                        func_args = {}
+                                    formatted_call = format_tool_call(func_name, func_args)
+                                    output.write(f"[#2b2420 on #ffb347] {formatted_call} [/]")
+                            if content:
+                                output.write("[bold #ff8c00]Agent:[/bold #ff8c00]")
+                                md = Markdown(content)
+                                output.write(md)
+                                output.write("")
+                        elif role == "tool":
+                            tool_content = content[:200] + "..." if len(content) > 200 else content
+                            output.write(f"[#fdf5e6]↳ {tool_content}[/#fdf5e6]")
+                            output.write("")
+                    
+                    output.write(f"[dim]--- History loaded ---[/dim]")
+                    output.write("")
+                    
+                    token_stats = self.query_one("#token_stats", Static)
+                    token_text = f"↑ {hist_input} tokens  ↓ {hist_output} tokens  total: {hist_total} tokens"
+                    token_stats.update(token_text)
+                    
+                    self.query_one("#input", CustomTextArea).focus()
+                except Exception as e:
+                    output = self.query_one("#output", RichLog)
+                    output.write(f"[bold red]Failed to resume session: {str(e)}[/bold red]")
+        
+        self.push_screen(SessionListScreen(sessions), handle_session_selection)
     
     async def action_clear_output(self) -> None:
         output = self.query_one("#output", RichLog)

@@ -1,12 +1,32 @@
 import json
 import os
 import uuid
+import time
 from pathlib import Path
 from datetime import datetime
-from openai import OpenAI
+from openai import OpenAI, APITimeoutError, RateLimitError, APIConnectionError, InternalServerError
 from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, get_plan_reminder, get_plan_final_reminder, set_session_id, restore_plan, set_work_dir, WORK_DIR
 from .config import load_config, CONFIG_FILE
 from .output import HumanWriter, JsonWriter
+
+def call_openai_with_retry(client, model: str, messages: list, tools: list, max_retries: int = 3):
+    retryable_errors = (APITimeoutError, RateLimitError, APIConnectionError, InternalServerError)
+    
+    for attempt in range(max_retries + 1):
+        try:
+            return client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto"
+            )
+        except retryable_errors as e:
+            if attempt == max_retries:
+                raise
+            delay = 2 ** attempt
+            time.sleep(delay)
+        except Exception:
+            raise
 
 def get_session_dir() -> Path:
     session_dir = Path.home() / ".tricode" / "session"
@@ -366,11 +386,11 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
         writer.write_round(round_num)
         
         try:
-            response = client.chat.completions.create(
+            response = call_openai_with_retry(
+                client=client,
                 model=model,
                 messages=messages,
-                tools=filtered_tools,
-                tool_choice="auto"
+                tools=filtered_tools
             )
         except Exception as e:
             return f"OpenAI API error: {str(e)}"

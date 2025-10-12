@@ -151,6 +151,13 @@ def format_tool_result(tool_name: str, success: bool, result: str, arguments: di
             return "[OK] 0 sessions"
         sessions = result.count('\n') + 1 if result else 0
         return f"[OK] {sessions} sessions"
+    elif tool_name == "fetch_url":
+        if not success:
+            return f"[FAIL] {result}"
+        chars = len(result)
+        lines = result.count('\n') + 1 if result else 0
+        preview = result[:200].replace('\n', ' ') if len(result) > 200 else result.replace('\n', ' ')
+        return f"[OK] fetched {chars} chars ({lines} lines): {preview}..."
     else:
         preview = result[:100].replace('\n', ' ')
         return f"[OK] {preview}"
@@ -167,7 +174,8 @@ TOOL_DESCRIPTIONS = {
     "send_input": "Send commands to an active session",
     "read_output": "Read output from an active session",
     "close_session": "Close an active session",
-    "list_sessions": "List all active sessions"
+    "list_sessions": "List all active sessions",
+    "fetch_url": "Fetch web content and convert to Markdown (HTTP/HTTPS only, no JS rendering)"
 }
 
 def filter_tools_schema(allowed_tools: list = None) -> list:

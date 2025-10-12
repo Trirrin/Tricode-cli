@@ -11,6 +11,11 @@ import time
 import uuid
 import json
 from pathlib import Path
+import socket
+from urllib.parse import urlparse
+import requests
+import html2text
+from bs4 import BeautifulSoup
 
 CURRENT_PLAN = None
 CURRENT_SESSION_ID = None
@@ -396,6 +401,28 @@ TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {},
                 "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_url",
+            "description": "Fetch content from HTTP/HTTPS URL and convert HTML to Markdown format. Automatically filters out scripts and styles. Security: blocks private IP addresses.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The HTTP or HTTPS URL to fetch"
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Request timeout in seconds",
+                        "default": 10
+                    }
+                },
+                "required": ["url"]
             }
         }
     }
@@ -877,6 +904,95 @@ def list_sessions() -> Tuple[bool, str]:
         
         return True, "\n".join(lines)
 
+def _is_private_ip(hostname: str) -> bool:
+    try:
+        ip = socket.gethostbyname(hostname)
+        parts = ip.split('.')
+        if len(parts) != 4:
+            return True
+        
+        first = int(parts[0])
+        second = int(parts[1])
+        
+        if first == 127:
+            return True
+        if first == 10:
+            return True
+        if first == 172 and 16 <= second <= 31:
+            return True
+        if first == 192 and second == 168:
+            return True
+        if first == 169 and second == 254:
+            return True
+        
+        return False
+    except Exception:
+        return True
+
+def fetch_url(url: str, timeout: int = 10) -> Tuple[bool, str]:
+    MAX_SIZE = 5 * 1024 * 1024
+    
+    try:
+        parsed = urlparse(url)
+        
+        if parsed.scheme not in ['http', 'https']:
+            return False, f"Only HTTP/HTTPS protocols are supported, got: {parsed.scheme}"
+        
+        if not parsed.netloc:
+            return False, "Invalid URL: missing hostname"
+        
+        hostname = parsed.netloc.split(':')[0]
+        if _is_private_ip(hostname):
+            return False, f"Access to private IP addresses is forbidden: {hostname}"
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (compatible; TriCode/1.0)'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=timeout, stream=True)
+        response.raise_for_status()
+        
+        content_length = response.headers.get('Content-Length')
+        if content_length and int(content_length) > MAX_SIZE:
+            return False, f"Content too large: {content_length} bytes (max: {MAX_SIZE})"
+        
+        chunks = []
+        total_size = 0
+        for chunk in response.iter_content(chunk_size=8192):
+            total_size += len(chunk)
+            if total_size > MAX_SIZE:
+                return False, f"Content exceeded size limit during download (max: {MAX_SIZE} bytes)"
+            chunks.append(chunk)
+        
+        html_content = b''.join(chunks).decode(response.encoding or 'utf-8', errors='ignore')
+        
+        soup = BeautifulSoup(html_content, 'html.parser')
+        for script in soup(['script', 'style', 'noscript']):
+            script.decompose()
+        
+        h2t = html2text.HTML2Text()
+        h2t.ignore_links = False
+        h2t.ignore_images = False
+        h2t.ignore_emphasis = False
+        h2t.body_width = 0
+        
+        markdown = h2t.handle(str(soup))
+        markdown = markdown.strip()
+        
+        if not markdown:
+            return False, "Website returned no readable content (possibly JavaScript-rendered SPA or empty page)"
+        
+        return True, markdown
+        
+    except requests.exceptions.Timeout:
+        return False, f"Request timed out after {timeout} seconds"
+    except requests.exceptions.ConnectionError as e:
+        return False, f"Connection error: {str(e)}"
+    except requests.exceptions.HTTPError as e:
+        return False, f"HTTP error: {e.response.status_code} {e.response.reason}"
+    except Exception as e:
+        return False, f"Failed to fetch URL: {str(e)}"
+
 def get_plan_reminder() -> str:
     if CURRENT_PLAN is None:
         if not PLAN_DECISION_MADE:
@@ -951,6 +1067,9 @@ def format_tool_call(name: str, arguments: dict) -> str:
         return f'CLOSE_SESSION({sid})'
     elif name == "list_sessions":
         return 'LIST_SESSIONS()'
+    elif name == "fetch_url":
+        url = arguments.get("url", "")
+        return f'FETCH_URL("{url}")'
     else:
         return f'{name.upper()}({arguments})'
 
@@ -1027,5 +1146,10 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
         )
     elif name == "list_sessions":
         return list_sessions()
+    elif name == "fetch_url":
+        return fetch_url(
+            arguments.get("url"),
+            arguments.get("timeout", 10)
+        )
     else:
         return False, f"Unknown tool: {name}"

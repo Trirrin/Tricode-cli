@@ -8,7 +8,7 @@ from openai import OpenAI
 import tiktoken
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, TextArea, RichLog, Static, ListView, ListItem, Label
-from textual.containers import Container, Vertical
+from textual.containers import Container, Vertical, Horizontal
 from textual.binding import Binding
 from textual import events
 from textual.message import Message
@@ -228,6 +228,13 @@ class CustomTextArea(TextArea):
     
     def _on_key(self, event: events.Key) -> None:
         if event.key == "escape":
+            app = self.app
+            if hasattr(app, 'agent_running') and app.agent_running:
+                event.prevent_default()
+                event.stop()
+                app.action_cancel_request()
+                return
+            
             import time
             current_time = time.time()
             time_since_last_esc = current_time - self.last_esc_time
@@ -325,12 +332,15 @@ class AgentSession:
         total_tokens = input_tokens + output_tokens
         return input_tokens, output_tokens, total_tokens
         
-    def send_message(self, content: str) -> Iterator[dict]:
+    def send_message(self, content: str, cancel_check=None) -> Iterator[dict]:
         self.messages.append({"role": "user", "content": content})
         yield {"type": "user_message", "content": content}
         
         round_num = 0
         while True:
+            if cancel_check and cancel_check():
+                return
+            
             round_num += 1
             yield {"type": "round", "number": round_num}
             
@@ -357,6 +367,9 @@ class AgentSession:
             current_round_input = prompt_tokens
             
             for chunk in stream:
+                if cancel_check and cancel_check():
+                    return
+                
                 delta = chunk.choices[0].delta if chunk.choices else None
                 if not delta:
                     if chunk.usage:
@@ -439,6 +452,9 @@ class AgentSession:
             
             tool_results = []
             for tool_call in collected_tool_calls:
+                if cancel_check and cancel_check():
+                    return
+                
                 func_name = tool_call["function"]["name"]
                 try:
                     func_args = json.loads(tool_call["function"]["arguments"])
@@ -496,7 +512,22 @@ class TricodeApp(App):
         color: #fdf5e6;
     }
     
+    #stats_bar {
+        height: 1;
+        background: #2b2420;
+    }
+    
+    #loading_status {
+        width: 1fr;
+        height: 1;
+        background: #2b2420;
+        color: #ffa500;
+        text-align: left;
+        padding-left: 1;
+    }
+    
     #token_stats {
+        width: auto;
         height: 1;
         background: #2b2420;
         color: #ffa500;
@@ -532,6 +563,12 @@ class TricodeApp(App):
         self.bypass_work_dir_limit = bypass_work_dir_limit
         self.allowed_tools = allowed_tools
         self.override_system_prompt = override_system_prompt
+        self.agent_running = False
+        self.cancel_requested = False
+        self.spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self.spinner_index = 0
+        self.dots_count = 1
+        self.animation_timer = None
         
         set_work_dir(work_dir, bypass_work_dir_limit)
         
@@ -621,7 +658,9 @@ class TricodeApp(App):
         with Vertical(id="output_container"):
             yield RichLog(id="output", wrap=True, highlight=True, markup=True)
         
-        yield Static("↑ 0 tokens  ↓ 0 tokens  total: 0 tokens", id="token_stats")
+        with Horizontal(id="stats_bar"):
+            yield Static("", id="loading_status")
+            yield Static("↑ 0 tokens  ↓ 0 tokens  total: 0 tokens", id="token_stats")
         
         with Container(id="input_container"):
             yield CustomTextArea(id="input", show_line_numbers=False)
@@ -635,6 +674,35 @@ class TricodeApp(App):
         output.write(f"[dim]Press Enter to send, backslash+Enter for newline[/dim]")
         output.write("")
         self.query_one("#input", CustomTextArea).focus()
+    
+    def _update_loading_animation(self) -> None:
+        if not self.agent_running:
+            return
+        
+        spinner = self.spinner_chars[self.spinner_index]
+        dots = '.' * self.dots_count
+        loading_text = f"{spinner} Running{dots}"
+        
+        loading_widget = self.query_one("#loading_status", Static)
+        loading_widget.update(loading_text)
+        
+        self.spinner_index = (self.spinner_index + 1) % len(self.spinner_chars)
+        self.dots_count = (self.dots_count % 3) + 1
+    
+    def _start_loading(self) -> None:
+        self.agent_running = True
+        self.cancel_requested = False
+        self.animation_timer = self.set_interval(0.1, self._update_loading_animation)
+    
+    def _stop_loading(self) -> None:
+        self.agent_running = False
+        if self.animation_timer:
+            self.animation_timer.stop()
+            self.animation_timer = None
+        loading_widget = self.query_one("#loading_status", Static)
+        loading_widget.update("")
+        self.spinner_index = 0
+        self.dots_count = 1
     
     async def on_custom_text_area_submitted(self, event: CustomTextArea.Submitted) -> None:
         await self._send_message()
@@ -733,6 +801,9 @@ class TricodeApp(App):
         if not message:
             return
         
+        if self.agent_running:
+            return
+        
         self.message_history.append(message)
         self.history_index = -1
         
@@ -742,6 +813,7 @@ class TricodeApp(App):
         output.write(f"[bold #ffa500]You:[/bold #ffa500] {message}")
         output.write("")
         
+        self._start_loading()
         self.run_worker(self._process_response(message), exclusive=False)
     
     async def _process_response(self, message: str) -> None:
@@ -786,15 +858,31 @@ class TricodeApp(App):
             elif event["type"] == "error":
                 self.call_from_thread(lambda e=event: output.write(f"[bold red]Error:[/bold red] {e['content']}"))
                 self.call_from_thread(lambda: output.write(""))
+            
+            elif event["type"] == "cancelled":
+                self.call_from_thread(lambda: output.write("[bold yellow]Request cancelled by user[/bold yellow]"))
+                self.call_from_thread(lambda: output.write(""))
         
         def process_in_thread():
             try:
-                for event in self.session.send_message(message):
+                for event in self.session.send_message(message, lambda: self.cancel_requested):
+                    if self.cancel_requested:
+                        display_event({"type": "cancelled"})
+                        break
                     display_event(event)
             except Exception as e:
                 display_event({"type": "error", "content": str(e)})
         
-        await asyncio.to_thread(process_in_thread)
+        try:
+            await asyncio.to_thread(process_in_thread)
+        finally:
+            self._stop_loading()
+    
+    def action_cancel_request(self) -> None:
+        if self.agent_running:
+            self.cancel_requested = True
+            output = self.query_one("#output", RichLog)
+            output.write("[bold yellow]Cancelling request...[/bold yellow]")
     
     def action_quit(self) -> None:
         self.exit()

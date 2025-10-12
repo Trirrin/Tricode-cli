@@ -5,8 +5,9 @@ from pathlib import Path
 from datetime import datetime
 from typing import Iterator
 from openai import OpenAI
+import tiktoken
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, TextArea, RichLog
+from textual.widgets import Header, Footer, TextArea, RichLog, Static
 from textual.containers import Container, Vertical
 from textual.binding import Binding
 from textual import events
@@ -56,6 +57,27 @@ class AgentSession:
         self.client = client
         self.model = model
         self.filtered_tools = filter_tools_schema(allowed_tools)
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.total_tokens = 0
+        
+        try:
+            self.encoding = tiktoken.encoding_for_model(model)
+        except KeyError:
+            self.encoding = tiktoken.get_encoding("cl100k_base")
+    
+    def _count_messages_tokens(self) -> int:
+        num_tokens = 0
+        for message in self.messages:
+            num_tokens += 4
+            for key, value in message.items():
+                if key == "content" and value:
+                    num_tokens += len(self.encoding.encode(str(value)))
+                elif key == "name":
+                    num_tokens += len(self.encoding.encode(value))
+                    num_tokens -= 1
+        num_tokens += 2
+        return num_tokens
         
     def send_message(self, content: str) -> Iterator[dict]:
         self.messages.append({"role": "user", "content": content})
@@ -67,20 +89,79 @@ class AgentSession:
             yield {"type": "round", "number": round_num}
             
             try:
-                response = call_openai_with_retry(
+                stream = call_openai_with_retry(
                     client=self.client,
                     model=self.model,
                     messages=self.messages,
-                    tools=self.filtered_tools
+                    tools=self.filtered_tools,
+                    stream=True
                 )
             except Exception as e:
                 yield {"type": "error", "content": f"OpenAI API error: {str(e)}"}
                 return
             
-            message = response.choices[0].message
+            collected_content = ""
+            collected_tool_calls = []
+            tool_calls_map = {}
             
-            if not message.tool_calls:
-                final_content = message.content or "No response generated"
+            round_start_input = self.input_tokens
+            round_start_output = self.output_tokens
+            
+            prompt_tokens = self._count_messages_tokens()
+            current_round_input = prompt_tokens
+            
+            for chunk in stream:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if not delta:
+                    if chunk.usage:
+                        current_round_input = chunk.usage.prompt_tokens
+                        current_round_output = chunk.usage.completion_tokens
+                        self.input_tokens = round_start_input + current_round_input
+                        self.output_tokens = round_start_output + current_round_output
+                        self.total_tokens = self.input_tokens + self.output_tokens
+                        yield {
+                            "type": "token_update",
+                            "input_tokens": self.input_tokens,
+                            "output_tokens": self.output_tokens,
+                            "total_tokens": self.total_tokens
+                        }
+                    continue
+                
+                if delta.content:
+                    collected_content += delta.content
+                    current_round_output = len(self.encoding.encode(collected_content))
+                    self.input_tokens = round_start_input + current_round_input
+                    self.output_tokens = round_start_output + current_round_output
+                    self.total_tokens = self.input_tokens + self.output_tokens
+                    yield {
+                        "type": "token_update",
+                        "input_tokens": self.input_tokens,
+                        "output_tokens": self.output_tokens,
+                        "total_tokens": self.total_tokens
+                    }
+                
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        if idx not in tool_calls_map:
+                            tool_calls_map[idx] = {
+                                "id": tc_delta.id or "",
+                                "type": "function",
+                                "function": {
+                                    "name": "",
+                                    "arguments": ""
+                                }
+                            }
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                tool_calls_map[idx]["function"]["name"] = tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                tool_calls_map[idx]["function"]["arguments"] += tc_delta.function.arguments
+            
+            collected_tool_calls = [tool_calls_map[i] for i in sorted(tool_calls_map.keys())]
+            
+            if not collected_tool_calls:
+                final_content = collected_content or "No response generated"
                 yield {"type": "assistant_message", "content": final_content}
                 self.messages.append({"role": "assistant", "content": final_content})
                 save_session(self.session_id, self.messages)
@@ -88,24 +169,15 @@ class AgentSession:
             
             self.messages.append({
                 "role": "assistant",
-                "content": message.content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments
-                        }
-                    } for tc in message.tool_calls
-                ]
+                "content": collected_content,
+                "tool_calls": collected_tool_calls
             })
             
             tool_results = []
-            for tool_call in message.tool_calls:
-                func_name = tool_call.function.name
+            for tool_call in collected_tool_calls:
+                func_name = tool_call["function"]["name"]
                 try:
-                    func_args = json.loads(tool_call.function.arguments)
+                    func_args = json.loads(tool_call["function"]["arguments"])
                 except json.JSONDecodeError:
                     func_args = {}
                 
@@ -117,7 +189,7 @@ class AgentSession:
                 formatted_result = format_tool_result(func_name, success, result, func_args)
                 yield {"type": "tool_result", "name": func_name, "success": success, "result": result, "formatted": formatted_result}
                 
-                tool_results.append({"tool_call_id": tool_call.id, "content": result})
+                tool_results.append({"tool_call_id": tool_call["id"], "content": result})
             
             for tool_result in tool_results:
                 self.messages.append({
@@ -146,6 +218,14 @@ class TricodeApp(App):
         height: 100%;
         background: #3a3228;
         color: #fdf5e6;
+    }
+    
+    #token_stats {
+        height: 1;
+        background: #2b2420;
+        color: #ffa500;
+        text-align: right;
+        padding-right: 1;
     }
     
     #input_container {
@@ -258,6 +338,8 @@ class TricodeApp(App):
         with Vertical(id="output_container"):
             yield RichLog(id="output", wrap=True, highlight=True, markup=True)
         
+        yield Static("↑ 0 tokens  ↓ 0 tokens  total: 0 tokens", id="token_stats")
+        
         with Container(id="input_container"):
             yield CustomTextArea(id="input", show_line_numbers=False)
         
@@ -291,10 +373,15 @@ class TricodeApp(App):
     
     async def _process_response(self, message: str) -> None:
         output = self.query_one("#output", RichLog)
+        token_stats = self.query_one("#token_stats", Static)
         
         def display_event(event):
             if event["type"] == "round":
                 pass
+            
+            elif event["type"] == "token_update":
+                token_text = f"↑ {event['input_tokens']} tokens  ↓ {event['output_tokens']} tokens  total: {event['total_tokens']} tokens"
+                self.call_from_thread(lambda: token_stats.update(token_text))
             
             elif event["type"] == "tool_call":
                 self.call_from_thread(lambda e=event: output.write(f"[#2b2420 on #ffb347] {e['formatted']} [/]"))
@@ -356,6 +443,9 @@ class TricodeApp(App):
         output.write(f"Session ID: {self.session_id}")
         output.write(f"[dim]Press Enter to send, backslash+Enter for newline[/dim]")
         output.write("")
+        
+        token_stats = self.query_one("#token_stats", Static)
+        token_stats.update("↑ 0 tokens  ↓ 0 tokens  total: 0 tokens")
         
         self.query_one("#input", CustomTextArea).focus()
     

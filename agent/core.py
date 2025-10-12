@@ -9,17 +9,21 @@ from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, get_plan_remind
 from .config import load_config, CONFIG_FILE
 from .output import HumanWriter, JsonWriter
 
-def call_openai_with_retry(client, model: str, messages: list, tools: list, max_retries: int = 3):
+def call_openai_with_retry(client, model: str, messages: list, tools: list, max_retries: int = 3, stream: bool = False):
     retryable_errors = (APITimeoutError, RateLimitError, APIConnectionError, InternalServerError)
     
     for attempt in range(max_retries + 1):
         try:
-            return client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=tools,
-                tool_choice="auto"
-            )
+            kwargs = {
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "auto"
+            }
+            if stream:
+                kwargs["stream"] = True
+                kwargs["stream_options"] = {"include_usage": True}
+            return client.chat.completions.create(**kwargs)
         except retryable_errors as e:
             if attempt == max_retries:
                 raise

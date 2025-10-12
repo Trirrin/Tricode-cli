@@ -12,6 +12,7 @@ from textual.binding import Binding
 from textual import events
 from textual.message import Message
 from rich.markdown import Markdown
+from rich.text import Text
 from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, set_session_id, set_work_dir, restore_plan
 from .config import load_config
 from .core import load_session, save_session, get_session_dir, filter_tools_schema, build_tools_description, load_agents_md, format_tool_result, call_openai_with_retry
@@ -299,10 +300,19 @@ class TricodeApp(App):
                 self.call_from_thread(lambda e=event: output.write(f"[#2b2420 on #ffb347] {e['formatted']} [/]"))
             
             elif event["type"] == "tool_result":
-                if event["success"]:
-                    self.call_from_thread(lambda e=event: output.write(f"[#fdf5e6]↳ {e['formatted']}[/#fdf5e6]"))
+                if event.get("name") == "plan":
+                    def write_plan_result(formatted):
+                        plan_text = Text.from_ansi(formatted)
+                        output.write(plan_text)
+                    if event["success"]:
+                        self.call_from_thread(lambda e=event: write_plan_result(e['formatted']))
+                    else:
+                        self.call_from_thread(lambda e=event: output.write(f"[red]{e['formatted']}[/red]"))
                 else:
-                    self.call_from_thread(lambda e=event: output.write(f"[red]↳ {e['formatted']}[/red]"))
+                    if event["success"]:
+                        self.call_from_thread(lambda e=event: output.write(f"[#fdf5e6]↳ {e['formatted']}[/#fdf5e6]"))
+                    else:
+                        self.call_from_thread(lambda e=event: output.write(f"[red]↳ {e['formatted']}[/red]"))
                 self.call_from_thread(lambda: output.write(""))
             
             elif event["type"] == "assistant_message":

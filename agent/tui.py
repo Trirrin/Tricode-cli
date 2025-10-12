@@ -419,6 +419,24 @@ class AgentSession:
                 "tool_calls": collected_tool_calls
             })
             
+            tool_calls_tokens = 0
+            for tc in collected_tool_calls:
+                func_name = tc.get("function", {}).get("name", "")
+                func_args = tc.get("function", {}).get("arguments", "")
+                if func_name:
+                    tool_calls_tokens += len(self.encoding.encode(func_name))
+                if func_args:
+                    tool_calls_tokens += len(self.encoding.encode(func_args))
+            
+            self.output_tokens += tool_calls_tokens
+            self.total_tokens = self.input_tokens + self.output_tokens
+            yield {
+                "type": "token_update",
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+                "total_tokens": self.total_tokens
+            }
+            
             tool_results = []
             for tool_call in collected_tool_calls:
                 func_name = tool_call["function"]["name"]
@@ -437,12 +455,24 @@ class AgentSession:
                 
                 tool_results.append({"tool_call_id": tool_call["id"], "content": result})
             
+            tool_messages_tokens = 0
             for tool_result in tool_results:
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tool_result["tool_call_id"],
                     "content": tool_result["content"]
                 })
+                tool_messages_tokens += len(self.encoding.encode(str(tool_result["content"])))
+                tool_messages_tokens += 4
+            
+            self.input_tokens += tool_messages_tokens
+            self.total_tokens = self.input_tokens + self.output_tokens
+            yield {
+                "type": "token_update",
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+                "total_tokens": self.total_tokens
+            }
             
             save_session(self.session_id, self.messages)
 

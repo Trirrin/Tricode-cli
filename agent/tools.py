@@ -19,6 +19,7 @@ import html2text
 from bs4 import BeautifulSoup
 from ddgs import DDGS
 import difflib
+import hashlib
 
 CURRENT_PLAN = None
 CURRENT_SESSION_ID = None
@@ -227,37 +228,46 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "Edit specific line ranges in an existing file. IMPORTANT: Edit ONLY the lines that need to change - minimize the edit range to avoid unnecessary rewrites.",
+            "description": "Edit a file using robust anchor-based hunks to replace/insert/delete content with minimal token footprint.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "The file path to edit"
+                        "description": "Target file path"
                     },
-                    "replacements": {
+                    "hunks": {
                         "type": "array",
-                        "description": "List of replacements. Each replacement specifies 'range' [start_line, end_line] to replace and 'content' as the new text. Line numbers start from 1. Use precise ranges - only edit lines that actually need to change.",
+                        "description": "List of operations. Each hunk locates an anchor (exact or regex) and applies an op: replace | insert_before | insert_after | delete.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "range": {
-                                    "type": "array",
-                                    "items": {"type": "integer"},
-                                    "minItems": 2,
-                                    "maxItems": 2,
-                                    "description": "Line range [start, end] to replace. Be precise - only include lines that must change."
+                                "op": {"type": "string", "enum": ["replace", "insert_before", "insert_after", "delete"]},
+                                "anchor": {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": {"type": "string", "enum": ["exact", "regex"]},
+                                        "pattern": {"type": "string"},
+                                        "occurrence": {"type": "string", "enum": ["first", "last"], "default": "first"},
+                                        "nth": {"type": "integer", "minimum": 1, "description": "If set, match the n-th occurrence (1-based)"}
+                                    },
+                                    "required": ["type", "pattern"]
                                 },
-                                "content": {
-                                    "type": "string",
-                                    "description": "New content to replace the range. Use empty string to delete lines."
-                                }
+                                "content": {"type": "string", "description": "New text for replace/insert ops"},
+                                "must_unique": {"type": "boolean", "default": True}
                             },
-                            "required": ["range", "content"]
+                            "required": ["op", "anchor"]
                         }
-                    }
+                    },
+                    "precondition": {
+                        "type": "object",
+                        "properties": {
+                            "file_sha256": {"type": "string", "description": "Optional whole-file sha256 to ensure we edit the expected version"}
+                        }
+                    },
+                    "dry_run": {"type": "boolean", "default": False}
                 },
-                "required": ["path", "replacements"]
+                "required": ["path", "hunks"]
             }
         }
     },
@@ -696,31 +706,149 @@ def create_file(path: str, content: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Create failed: {str(e)}"
 
-def edit_file(path: str, replacements: list) -> Tuple[bool, str]:
+def _compute_sha256(text: str) -> str:
+    # minimal helper to hash whole file
+    h = hashlib.sha256()
+    h.update(text.encode('utf-8'))
+    return h.hexdigest()
+
+
+def _index_to_line(idx: int, line_starts: list) -> int:
+    # binary search to map byte offset to 1-based line number
+    lo, hi = 0, len(line_starts) - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if line_starts[mid] <= idx:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return hi + 1
+
+
+def _build_line_starts(text: str) -> list:
+    # record start offset for each line (1-based lines)
+    starts = [0]
+    for i, ch in enumerate(text):
+        if ch == '\n':
+            starts.append(i + 1)
+    return starts
+
+
+def _find_matches(text: str, anchor: dict) -> list:
+    # return list of (start, end) spans for anchor
+    a_type = anchor.get("type")
+    pattern = anchor.get("pattern", "")
+    if a_type == "regex":
+        try:
+            rgx = re.compile(pattern, re.MULTILINE)
+        except re.error as e:
+            raise ValueError(f"Invalid regex: {e}")
+        return [(m.start(), m.end()) for m in rgx.finditer(text)]
+    elif a_type == "exact":
+        spans = []
+        start = 0
+        while True:
+            i = text.find(pattern, start)
+            if i == -1:
+                break
+            spans.append((i, i + len(pattern)))
+            start = i + (1 if len(pattern) == 0 else max(1, len(pattern)))
+        return spans
+    else:
+        raise ValueError("Unsupported anchor.type; use 'exact' or 'regex'")
+
+
+def edit_file(path: str, hunks: list, precondition: dict = None, dry_run: bool = False) -> Tuple[bool, str]:
     resolved_path = resolve_path(path)
     valid, err_msg = validate_path(resolved_path)
     if not valid:
         return False, err_msg
-    
+
     try:
         with open(resolved_path, 'r', encoding='utf-8') as f:
-            original_lines = f.readlines()
-        
-        lines = original_lines.copy()
-        sorted_replacements = sorted(replacements, key=lambda r: r["range"][0], reverse=True)
-        
-        for replacement in sorted_replacements:
-            start, end = replacement["range"]
-            new_content = replacement["content"]
-            
-            if start < 1 or end > len(lines) or start > end:
-                return False, f"Invalid range: ({start}, {end}), file has {len(lines)} lines"
-            
-            if not new_content.endswith('\n') and end < len(lines):
-                new_content += '\n'
-            
-            lines[start-1:end] = [new_content]
-        
+            original_text = f.read()
+
+        if precondition and precondition.get("file_sha256"):
+            cur = _compute_sha256(original_text)
+            if cur != precondition.get("file_sha256"):
+                return False, f"Precondition failed: file sha256 mismatch"
+
+        text = original_text
+        applied = 0
+        matches_meta = []
+
+        for h in hunks:
+            op = h.get("op")
+            anchor = h.get("anchor") or {}
+            must_unique = h.get("must_unique", True)
+            content = h.get("content", "")
+
+            spans = _find_matches(text, anchor)
+            if not spans:
+                return False, f"Anchor not found for op={op}"
+
+            # choose occurrence
+            nth = h.get("nth")
+            occ = anchor.get("occurrence", "first")
+            if nth is not None:
+                idx = nth - 1
+            elif occ == "last":
+                idx = len(spans) - 1
+            else:
+                idx = 0
+
+            if must_unique and len(spans) != 1:
+                return False, f"Anchor ambiguous: {len(spans)} matches"
+
+            if idx < 0 or idx >= len(spans):
+                return False, f"Requested occurrence not found"
+
+            s, e = spans[idx]
+            # record line mapping for this hunk
+            line_starts = _build_line_starts(text)
+            start_line = _index_to_line(s, line_starts)
+            end_line = _index_to_line(e - 1 if e > s else s, line_starts)
+
+            if op == "replace":
+                text = text[:s] + content + text[e:]
+            elif op == "insert_before":
+                text = text[:s] + content + text[s:]
+            elif op == "insert_after":
+                text = text[:e] + content + text[e:]
+            elif op == "delete":
+                text = text[:s] + text[e:]
+            else:
+                return False, f"Unsupported op: {op}"
+
+            applied += 1
+            snippet = original_text[s:e] if (s < len(original_text) and e <= len(original_text)) else ""
+            matches_meta.append({
+                "op": op,
+                "start_line": start_line,
+                "end_line": end_line,
+                "anchor_snippet": snippet[:120]
+            })
+
+        if dry_run:
+            # compute diff without writing
+            diff = difflib.unified_diff(
+                original_text.splitlines(keepends=True),
+                text.splitlines(keepends=True),
+                fromfile=f"a/{os.path.basename(resolved_path)}",
+                tofile=f"b/{os.path.basename(resolved_path)}",
+                lineterm='\n'
+            )
+            diff_text = ''.join(diff)
+            result = {
+                "success": True,
+                "path": resolved_path,
+                "applied": False,
+                "hunks_applied": applied,
+                "matches": matches_meta,
+                "diff": diff_text
+            }
+            return True, json.dumps(result)
+
         dir_path = os.path.dirname(resolved_path)
         with tempfile.NamedTemporaryFile(
             mode='w',
@@ -728,26 +856,29 @@ def edit_file(path: str, replacements: list) -> Tuple[bool, str]:
             dir=dir_path or '.',
             delete=False
         ) as tmp:
-            tmp.writelines(lines)
+            tmp.write(text)
             tmp_path = tmp.name
-        
+
         os.rename(tmp_path, resolved_path)
-        
+
         diff = difflib.unified_diff(
-            original_lines,
-            lines,
+            original_text.splitlines(keepends=True),
+            text.splitlines(keepends=True),
             fromfile=f"a/{os.path.basename(resolved_path)}",
             tofile=f"b/{os.path.basename(resolved_path)}",
-            lineterm=''
+            lineterm='\n'
         )
-        diff_text = '\n'.join(diff)
-        
+        diff_text = ''.join(diff)
+
         result = {
             "success": True,
             "path": resolved_path,
+            "applied": True,
+            "hunks_applied": applied,
+            "matches": matches_meta,
             "diff": diff_text
         }
-        
+
         return True, json.dumps(result)
     except FileNotFoundError:
         return False, f"File not found: {resolved_path}"
@@ -1283,10 +1414,9 @@ def format_tool_call(name: str, arguments: dict) -> str:
         return f'CREATE("{path}")'
     elif name == "edit_file":
         path = arguments.get("path", "")
-        replacements = arguments.get("replacements", [])
-        if replacements:
-            ranges_str = ", ".join([f"{r['range'][0]}-{r['range'][1]}" for r in replacements])
-            return f'EDIT("{path}", lines=[{ranges_str}])'
+        hunks = arguments.get("hunks", [])
+        if hunks:
+            return f'EDIT("{path}", hunks={len(hunks)})'
         return f'EDIT("{path}")'
     elif name == "list_directory":
         path = arguments.get("path", ".")
@@ -1373,7 +1503,9 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
     elif name == "edit_file":
         return edit_file(
             arguments.get("path"),
-            arguments.get("replacements")
+            arguments.get("hunks"),
+            arguments.get("precondition"),
+            arguments.get("dry_run", False)
         )
     elif name == "list_directory":
         return list_directory(

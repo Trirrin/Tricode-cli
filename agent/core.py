@@ -724,15 +724,13 @@ def format_tool_result(tool_name: str, success: bool, result: str, arguments: di
             return f"[OK] created {lines} lines"
         return f"[OK] created with content"
     elif tool_name == "edit_file":
-        # CLI 不展示 diff：仅输出简要统计，TUI 会读取 raw result 自行渲染
+        # CLI 简要统计，TUI 渲染原始 diff
         try:
             result_data = json.loads(result)
             diff_text = result_data.get("diff", "")
             if not diff_text:
-                # 没有变更
                 return "[OK] no changes made"
 
-            # 尝试从 diff 估算增删行数
             lines = diff_text.split('\n')
             added = deleted = 0
             started = False
@@ -749,15 +747,13 @@ def format_tool_result(tool_name: str, success: bool, result: str, arguments: di
             if added or deleted:
                 return f"[OK] edited (+{added} / -{deleted}) lines"
 
-            # 回退到基于参数的统计
-            if arguments and 'replacements' in arguments:
-                total_lines = sum(r['range'][1] - r['range'][0] + 1 for r in arguments['replacements'])
-                return f"[OK] edited {total_lines} lines"
+            # 参数回退：使用 hunk 数量
+            if arguments and 'hunks' in arguments:
+                return f"[OK] applied {len(arguments['hunks'])} hunks"
             return "[OK] edited successfully"
         except (json.JSONDecodeError, KeyError, TypeError):
-            if arguments and 'replacements' in arguments:
-                total_lines = sum(r['range'][1] - r['range'][0] + 1 for r in arguments['replacements'])
-                return f"[OK] edited {total_lines} lines"
+            if arguments and 'hunks' in arguments:
+                return f"[OK] applied {len(arguments['hunks'])} hunks"
             return "[OK] edited successfully"
     elif tool_name == "search_context":
         if "No matches found" in result:

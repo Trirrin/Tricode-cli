@@ -862,6 +862,122 @@ def build_tools_description(allowed_tools: list = None) -> str:
     
     return "\n".join(lines)
 
+def build_system_prompt(allowed_tools: list = None, override_system_prompt: bool = False) -> str:
+    """Build system prompt for agent with tool descriptions and guidelines.
+    
+    Args:
+        allowed_tools: List of allowed tool names (None = all tools allowed)
+        override_system_prompt: If True, only use AGENTS.md content without base identity
+    
+    Returns:
+        Complete system prompt string
+    """
+    tools_desc = build_tools_description(allowed_tools)
+    
+    has_session_tools = (
+        allowed_tools is None or 
+        any(t in allowed_tools for t in ["start_session", "send_input", "read_output", "close_session", "list_sessions"])
+    )
+    
+    base_identity = (
+        "You are Tricode, a powerful autonomous agent running in terminal. "
+        "You are a capable autonomous agent with access to file system tools. "
+        "Your goal is to complete user requests efficiently and intelligently.\n\n"
+    )
+    
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
+    time_section = (
+        f"CURRENT LOCAL TIME: {current_time}\n"
+        f"Use this timestamp when processing time-related requests.\n\n"
+    )
+    
+    work_dir_section = (
+        f"WORKING DIRECTORY: {WORK_DIR}\n"
+        f"All relative paths (like '.', 'file.txt', 'subdir/') are relative to this directory.\n\n"
+    )
+    
+    tools_section = (
+        f"{tools_desc}\n\n"
+        "CRITICAL: PLAN TOOL MUST BE YOUR FIRST TOOL CALL:\n"
+        "Before using ANY other tool, you MUST call plan with one of these actions:\n\n"
+        "IMPORTANT: First check if you have ALL necessary tools to complete the request. "
+        "If you lack critical tools (e.g., need read_file but don't have it, or need edit_file but don't have it), "
+        "use plan(action='skip', reason='Missing required tools: [list]') and explain to the user that the task "
+        "is impossible without those tools. DO NOT create a plan or attempt the task if tools are insufficient.\n\n"
+        "1. plan(action='create', tasks=[...]) - For multi-step tasks:\n"
+        "   - User requests multiple operations (e.g., 'fix X and update Y')\n"
+        "   - Task involves editing ≥2 files\n"
+        "   - Task requires verification steps (edit → test → fix)\n"
+        "   - User explicitly lists steps\n\n"
+        "   CRITICAL: After creating a plan, you MUST update it as you work:\n"
+        "   - BEFORE starting a task: plan(action='update', task_id=X, status='in_progress')\n"
+        "   - AFTER finishing a task: plan(action='update', task_id=X, status='completed')\n"
+        "   - DO NOT batch updates - update immediately after each task completion\n"
+        "   - If you do 2+ operations without updating, you will be warned\n\n"
+        "2. plan(action='skip', reason='...') - For simple tasks:\n"
+        "   - Greetings or casual conversation\n"
+        "   - Single file read/search\n"
+        "   - Single command execution\n"
+        "   - Simple questions about code\n\n"
+        "If you try to use other tools before making this decision, they will be BLOCKED.\n\n"
+    )
+    
+    if has_session_tools:
+        tools_section += (
+            "INTERACTIVE SESSION USAGE:\n"
+            "For persistent interactive processes (SSH, Python REPL, Docker exec):\n"
+            "1. Use start_session to launch the process - returns a session_id\n"
+            "2. Use send_input to send commands to the session\n"
+            "3. Use read_output to retrieve the output (wait for command completion)\n"
+            "4. Always close_session when done to clean up resources\n"
+            "Note: Sessions auto-expire after 30s of inactivity or 5 minutes total. Max 3 concurrent sessions.\n\n"
+        )
+    
+    has_search = allowed_tools is None or "search_context" in allowed_tools
+    has_read = allowed_tools is None or "read_file" in allowed_tools
+    has_edit = allowed_tools is None or "edit_file" in allowed_tools or "create_file" in allowed_tools
+    
+    principles = [
+        "1. Plan first: Break down user requests into clear tasks",
+        "2. Be proactive: Always use tools to verify and explore before concluding",
+        "3. Handle errors gracefully: If a tool fails, try alternative approaches"
+    ]
+    
+    if has_search:
+        principles.append("4. Search first: When uncertain about file names or locations, use search_context")
+    if has_read and has_edit:
+        principles.append(f"{len(principles) + 1}. Verify before acting: Read files before modifying them")
+    principles.append(f"{len(principles) + 1}. Track progress: Update plan status after each task completion")
+    
+    tools_section += "Core principles:\n" + "\n".join(principles) + "\n\n"
+    
+    if has_search or has_read or has_edit:
+        examples = ["Examples of proactive behavior:"]
+        if has_search:
+            examples.append("- File not found? Search for similar names or patterns")
+            examples.append("- Unclear request? Search to understand the codebase structure")
+        if has_read and has_edit:
+            examples.append("- Before editing? Read the file first to understand context")
+        tools_section += "\n".join(examples) + "\n\n"
+    
+    tools_section += (
+        "Never give up immediately when encountering errors. Try different approaches.\n\n"
+        "IMPORTANT: If the user's request cannot be completed with your available tools, "
+        "clearly tell them that the task is not possible with the current tool limitations. "
+        "Explain what tools would be needed and do not attempt to complete the task with inappropriate tools."
+    )
+    
+    agents_md_content = load_agents_md()
+    
+    if agents_md_content and override_system_prompt:
+        system_prompt = time_section + work_dir_section + tools_section + "\n\n" + agents_md_content
+    elif agents_md_content:
+        system_prompt = base_identity + time_section + work_dir_section + tools_section + "\n\n" + agents_md_content
+    else:
+        system_prompt = base_identity + time_section + work_dir_section + tools_section
+    
+    return system_prompt
+
 def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, override_system_prompt: bool = False, resume_session_id: str = None, allowed_tools: list = None, work_dir: str = None, bypass_work_dir_limit: bool = False, debug: bool = False, provider_name: str = None) -> str:
     set_work_dir(work_dir, bypass_work_dir_limit)
     
@@ -899,109 +1015,7 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
         messages = None
     
     if not messages:
-        tools_desc = build_tools_description(allowed_tools)
-        
-        has_session_tools = (
-            allowed_tools is None or 
-            any(t in allowed_tools for t in ["start_session", "send_input", "read_output", "close_session", "list_sessions"])
-        )
-        
-        base_identity = (
-            "You are Tricode, a powerful autonomous agent running in terminal. "
-            "You are a capable autonomous agent with access to file system tools. "
-            "Your goal is to complete user requests efficiently and intelligently.\n\n"
-        )
-        
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
-        time_section = (
-            f"CURRENT LOCAL TIME: {current_time}\n"
-            f"Use this timestamp when processing time-related requests.\n\n"
-        )
-        
-        work_dir_section = (
-            f"WORKING DIRECTORY: {WORK_DIR}\n"
-            f"All relative paths (like '.', 'file.txt', 'subdir/') are relative to this directory.\n\n"
-        )
-        
-        tools_section = (
-            f"{tools_desc}\n\n"
-            "CRITICAL: PLAN TOOL MUST BE YOUR FIRST TOOL CALL:\n"
-            "Before using ANY other tool, you MUST call plan with one of these actions:\n\n"
-            "IMPORTANT: First check if you have ALL necessary tools to complete the request. "
-            "If you lack critical tools (e.g., need read_file but don't have it, or need edit_file but don't have it), "
-            "use plan(action='skip', reason='Missing required tools: [list]') and explain to the user that the task "
-            "is impossible without those tools. DO NOT create a plan or attempt the task if tools are insufficient.\n\n"
-            "1. plan(action='create', tasks=[...]) - For multi-step tasks:\n"
-            "   - User requests multiple operations (e.g., 'fix X and update Y')\n"
-            "   - Task involves editing ≥2 files\n"
-            "   - Task requires verification steps (edit → test → fix)\n"
-            "   - User explicitly lists steps\n\n"
-            "   CRITICAL: After creating a plan, you MUST update it as you work:\n"
-            "   - BEFORE starting a task: plan(action='update', task_id=X, status='in_progress')\n"
-            "   - AFTER finishing a task: plan(action='update', task_id=X, status='completed')\n"
-            "   - DO NOT batch updates - update immediately after each task completion\n"
-            "   - If you do 2+ operations without updating, you will be warned\n\n"
-            "2. plan(action='skip', reason='...') - For simple tasks:\n"
-            "   - Greetings or casual conversation\n"
-            "   - Single file read/search\n"
-            "   - Single command execution\n"
-            "   - Simple questions about code\n\n"
-            "If you try to use other tools before making this decision, they will be BLOCKED.\n\n"
-        )
-        
-        if has_session_tools:
-            tools_section += (
-                "INTERACTIVE SESSION USAGE:\n"
-                "For persistent interactive processes (SSH, Python REPL, Docker exec):\n"
-                "1. Use start_session to launch the process - returns a session_id\n"
-                "2. Use send_input to send commands to the session\n"
-                "3. Use read_output to retrieve the output (wait for command completion)\n"
-                "4. Always close_session when done to clean up resources\n"
-                "Note: Sessions auto-expire after 30s of inactivity or 5 minutes total. Max 3 concurrent sessions.\n\n"
-            )
-        
-        has_search = allowed_tools is None or "search_context" in allowed_tools
-        has_read = allowed_tools is None or "read_file" in allowed_tools
-        has_edit = allowed_tools is None or "edit_file" in allowed_tools or "create_file" in allowed_tools
-        
-        principles = [
-            "1. Plan first: Break down user requests into clear tasks",
-            "2. Be proactive: Always use tools to verify and explore before concluding",
-            "3. Handle errors gracefully: If a tool fails, try alternative approaches"
-        ]
-        
-        if has_search:
-            principles.append("4. Search first: When uncertain about file names or locations, use search_context")
-        if has_read and has_edit:
-            principles.append(f"{len(principles) + 1}. Verify before acting: Read files before modifying them")
-        principles.append(f"{len(principles) + 1}. Track progress: Update plan status after each task completion")
-        
-        tools_section += "Core principles:\n" + "\n".join(principles) + "\n\n"
-        
-        if has_search or has_read or has_edit:
-            examples = ["Examples of proactive behavior:"]
-            if has_search:
-                examples.append("- File not found? Search for similar names or patterns")
-                examples.append("- Unclear request? Search to understand the codebase structure")
-            if has_read and has_edit:
-                examples.append("- Before editing? Read the file first to understand context")
-            tools_section += "\n".join(examples) + "\n\n"
-        
-        tools_section += (
-            "Never give up immediately when encountering errors. Try different approaches.\n\n"
-            "IMPORTANT: If the user's request cannot be completed with your available tools, "
-            "clearly tell them that the task is not possible with the current tool limitations. "
-            "Explain what tools would be needed and do not attempt to complete the task with inappropriate tools."
-        )
-        
-        agents_md_content = load_agents_md()
-        
-        if agents_md_content and override_system_prompt:
-            system_prompt = time_section + work_dir_section + tools_section + "\n\n" + agents_md_content
-        elif agents_md_content:
-            system_prompt = base_identity + time_section + work_dir_section + tools_section + "\n\n" + agents_md_content
-        else:
-            system_prompt = base_identity + time_section + work_dir_section + tools_section
+        system_prompt = build_system_prompt(allowed_tools, override_system_prompt)
         
         messages = [
             {"role": "system", "content": system_prompt},

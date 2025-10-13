@@ -22,7 +22,7 @@ from rich.console import Group
 import re
 from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, set_session_id, set_work_dir, restore_plan
 from .config import load_config, get_provider_config
-from .core import load_session, save_session, get_session_dir, filter_tools_schema, build_tools_description, load_agents_md, format_tool_result, call_llm_api
+from .core import load_session, save_session, get_session_dir, filter_tools_schema, build_tools_description, load_agents_md, format_tool_result, call_llm_api, build_system_prompt
 
 
 # TUI-only renderer: unified diff -> Rich Panel
@@ -742,38 +742,7 @@ class TricodeApp(App):
             self.history_index = -1
     
     def _create_initial_messages(self) -> list:
-        tools_desc = build_tools_description(self.allowed_tools)
-        
-        base_identity = (
-            "You are Tricode, a powerful autonomous agent running in terminal TUI mode. "
-            "You are a capable autonomous agent with access to file system tools. "
-            "Your goal is to complete user requests efficiently and intelligently.\n\n"
-        )
-        
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
-        time_section = f"CURRENT LOCAL TIME: {current_time}\n\n"
-        
-        from .tools import WORK_DIR
-        work_dir_section = f"WORKING DIRECTORY: {WORK_DIR}\n\n"
-        
-        tools_section = (
-            f"{tools_desc}\n\n"
-            "CRITICAL: PLAN TOOL MUST BE YOUR FIRST TOOL CALL\n\n"
-            "Core principles:\n"
-            "1. Plan first: Break down user requests into clear tasks\n"
-            "2. Be proactive: Always use tools to verify and explore\n"
-            "3. Handle errors gracefully: Try alternative approaches\n"
-        )
-        
-        agents_md_content = load_agents_md()
-        
-        if agents_md_content and self.override_system_prompt:
-            system_prompt = time_section + work_dir_section + tools_section + "\n\n" + agents_md_content
-        elif agents_md_content:
-            system_prompt = base_identity + time_section + work_dir_section + tools_section + "\n\n" + agents_md_content
-        else:
-            system_prompt = base_identity + time_section + work_dir_section + tools_section
-        
+        system_prompt = build_system_prompt(self.allowed_tools, self.override_system_prompt)
         return [{"role": "system", "content": system_prompt}]
     
     def compose(self) -> ComposeResult:

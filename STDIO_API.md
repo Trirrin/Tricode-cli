@@ -193,6 +193,45 @@ tricode --stdio "list files in current directory"
 
 ---
 
+
+### delete_file
+删除单个文件或符号链接。
+
+**参数：**
+```json
+{"path": "path/to/file.txt"}
+```
+
+**说明：**
+- 只能删除文件和符号链接，不能用于目录。
+- 删除成功或返回错误原因。
+
+
+### delete_path
+递归删除文件或目录。
+
+**参数：**
+```json
+{"path": "path/to/file_or_dir", "recursive": true}
+```
+
+**说明：**
+- 如果目标是目录，必须指定 `"recursive": true` 否则报错。
+- 能安全删除非空目录。
+
+
+### mkdir
+创建目录，可递归创建父目录。
+
+**参数：**
+```json
+{"path": "path/to/newdir", "parents": true, "exist_ok": false}
+```
+
+**说明：**
+- `parents` 默认true，允许递归创建父目录。
+- `exist_ok` 控制已存在时是否报错，默认false（即存在时报错）。
+
 ### read_file
 读取文件内容。
 
@@ -215,18 +254,26 @@ tricode --stdio "list files in current directory"
 ---
 
 ### edit_file
-编辑现有文件。
+使用基于锚点的 hunk 操作编辑文件，减少行号漂移与 token 消耗。
 
 **参数：**
 ```json
 {
   "path": "tricode.py",
-  "replacements": [
+  "hunks": [
     {
-      "range": [10, 12],
-      "content": "new content for lines 10-12"
+      "op": "replace",
+      "anchor": {"type": "exact", "pattern": "def main():"},
+      "content": "def main():\n    print(\"hi\")\n"
+    },
+    {
+      "op": "insert_after",
+      "anchor": {"type": "regex", "pattern": "^class Runner\\(.*\\):$", "occurrence": "first"},
+      "content": "\n    # new method\n    def ping(self):\n        return 'pong'\n"
     }
-  ]
+  ],
+  "precondition": {"file_sha256": "<optional sha256>"},
+  "dry_run": false
 }
 ```
 

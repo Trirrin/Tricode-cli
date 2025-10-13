@@ -218,7 +218,7 @@ Plans: ~/.tricode/plans/
 
 ## Implementation Details
 
-- Agent runs until task completion (no round limit)
+- Agent runs until the task is completed, with no hard round limit (this line edited by edit tool).
 - Search uses ripgrep (rg) if available, falls back to Python regex
 - File writes are atomic (temp file + rename)
 - Path validation uses `os.path.realpath()` to prevent escapes

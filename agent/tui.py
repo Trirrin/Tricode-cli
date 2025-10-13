@@ -276,12 +276,13 @@ class CustomTextArea(TextArea):
 
 
 class AgentSession:
-    def __init__(self, session_id: str, messages: list, client: OpenAI, model: str, allowed_tools: list = None):
+    def __init__(self, session_id: str, messages: list, client: OpenAI, model: str, allowed_tools: list = None, debug: bool = False):
         self.session_id = session_id
         self.messages = messages
         self.client = client
         self.model = model
         self.filtered_tools = filter_tools_schema(allowed_tools)
+        self.debug = debug
         self.input_tokens = 0
         self.output_tokens = 0
         self.total_tokens = 0
@@ -350,7 +351,8 @@ class AgentSession:
                     model=self.model,
                     messages=self.messages,
                     tools=self.filtered_tools,
-                    stream=True
+                    stream=True,
+                    debug=self.debug
                 )
             except Exception as e:
                 yield {"type": "error", "content": f"OpenAI API error: {str(e)}"}
@@ -556,13 +558,14 @@ class TricodeApp(App):
     ]
     
     def __init__(self, config: dict, work_dir: str = None, bypass_work_dir_limit: bool = False, 
-                 allowed_tools: list = None, override_system_prompt: bool = False, resume_session_id: str = None):
+                 allowed_tools: list = None, override_system_prompt: bool = False, resume_session_id: str = None, debug: bool = False):
         super().__init__()
         self.config = config
         self.work_dir = work_dir
         self.bypass_work_dir_limit = bypass_work_dir_limit
         self.allowed_tools = allowed_tools
         self.override_system_prompt = override_system_prompt
+        self.debug = debug
         self.agent_running = False
         self.cancel_requested = False
         self.spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
@@ -589,7 +592,7 @@ class TricodeApp(App):
                 self.session_id = resume_session_id
                 set_session_id(self.session_id)
                 restore_plan(self.session_id)
-                self.session = AgentSession(self.session_id, messages, self.client, self.model, allowed_tools)
+                self.session = AgentSession(self.session_id, messages, self.client, self.model, allowed_tools, self.debug)
                 self.message_history = [msg.get("content") for msg in messages if msg.get("role") == "user"]
                 self.history_index = -1
             except Exception as e:
@@ -600,7 +603,8 @@ class TricodeApp(App):
                     self._create_initial_messages(), 
                     self.client, 
                     self.model, 
-                    allowed_tools
+                    allowed_tools,
+                    self.debug
                 )
                 self.message_history = []
                 self.history_index = -1
@@ -612,7 +616,8 @@ class TricodeApp(App):
                 self._create_initial_messages(), 
                 self.client, 
                 self.model, 
-                allowed_tools
+                allowed_tools,
+                self.debug
             )
             self.message_history = []
             self.history_index = -1
@@ -895,7 +900,8 @@ class TricodeApp(App):
             self._create_initial_messages(), 
             self.client, 
             self.model, 
-            self.allowed_tools
+            self.allowed_tools,
+            self.debug
         )
         
         self.message_history = []
@@ -933,7 +939,8 @@ class TricodeApp(App):
                         messages,
                         self.client,
                         self.model,
-                        self.allowed_tools
+                        self.allowed_tools,
+                        self.debug
                     )
                     
                     hist_input, hist_output, hist_total = self.session.calculate_history_tokens()
@@ -1005,7 +1012,7 @@ class TricodeApp(App):
 
 
 def run_tui(work_dir: str = None, bypass_work_dir_limit: bool = False, allowed_tools: list = None, 
-            override_system_prompt: bool = False, resume_session_id: str = None):
+            override_system_prompt: bool = False, resume_session_id: str = None, debug: bool = False):
     from .config import CONFIG_FILE
     
     config = load_config()
@@ -1021,7 +1028,8 @@ def run_tui(work_dir: str = None, bypass_work_dir_limit: bool = False, allowed_t
         bypass_work_dir_limit=bypass_work_dir_limit,
         allowed_tools=allowed_tools,
         override_system_prompt=override_system_prompt,
-        resume_session_id=resume_session_id
+        resume_session_id=resume_session_id,
+        debug=debug
     )
     
     app.run()

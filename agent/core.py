@@ -9,7 +9,7 @@ from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, get_plan_remind
 from .config import load_config, CONFIG_FILE
 from .output import HumanWriter, JsonWriter
 
-def call_openai_with_retry(client, model: str, messages: list, tools: list, max_retries: int = 3, stream: bool = False):
+def call_openai_with_retry(client, model: str, messages: list, tools: list, max_retries: int = 3, stream: bool = False, debug: bool = False):
     retryable_errors = (APITimeoutError, RateLimitError, APIConnectionError, InternalServerError)
     
     for attempt in range(max_retries + 1):
@@ -23,7 +23,51 @@ def call_openai_with_retry(client, model: str, messages: list, tools: list, max_
             if stream:
                 kwargs["stream"] = True
                 kwargs["stream_options"] = {"include_usage": True}
-            return client.chat.completions.create(**kwargs)
+            
+            if debug:
+                print("\n" + "="*80, flush=True)
+                print("[DEBUG] API Request:", flush=True)
+                print("="*80, flush=True)
+                print(f"Model: {model}", flush=True)
+                print(f"Messages ({len(messages)}):", flush=True)
+                for i, msg in enumerate(messages):
+                    print(f"\n  [{i}] Role: {msg.get('role', 'unknown')}", flush=True)
+                    content = msg.get('content', '')
+                    if content:
+                        if len(content) > 500:
+                            print(f"  Content: {content[:500]}... (truncated)", flush=True)
+                        else:
+                            print(f"  Content: {content}", flush=True)
+                    if 'tool_calls' in msg:
+                        print(f"  Tool calls: {len(msg['tool_calls'])}", flush=True)
+                print(f"\nTools: {len(tools)} available", flush=True)
+                print("="*80 + "\n", flush=True)
+            
+            response = client.chat.completions.create(**kwargs)
+            
+            if debug and not stream:
+                print("\n" + "="*80, flush=True)
+                print("[DEBUG] API Response:", flush=True)
+                print("="*80, flush=True)
+                print(f"Response ID: {getattr(response, 'id', 'N/A')}", flush=True)
+                print(f"Model: {getattr(response, 'model', 'N/A')}", flush=True)
+                if hasattr(response, 'usage'):
+                    print(f"Usage: {response.usage}", flush=True)
+                if hasattr(response, 'choices') and response.choices:
+                    msg = response.choices[0].message
+                    print(f"Message role: {msg.role}", flush=True)
+                    if msg.content:
+                        if len(msg.content) > 500:
+                            print(f"Content: {msg.content[:500]}... (truncated)", flush=True)
+                        else:
+                            print(f"Content: {msg.content}", flush=True)
+                    if msg.tool_calls:
+                        print(f"Tool calls: {len(msg.tool_calls)}", flush=True)
+                        for tc in msg.tool_calls:
+                            print(f"  - {tc.function.name}", flush=True)
+                print("="*80 + "\n", flush=True)
+            
+            return response
         except retryable_errors as e:
             if attempt == max_retries:
                 raise
@@ -236,7 +280,7 @@ def build_tools_description(allowed_tools: list = None) -> str:
     
     return "\n".join(lines)
 
-def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, override_system_prompt: bool = False, resume_session_id: str = None, allowed_tools: list = None, work_dir: str = None, bypass_work_dir_limit: bool = False) -> str:
+def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, override_system_prompt: bool = False, resume_session_id: str = None, allowed_tools: list = None, work_dir: str = None, bypass_work_dir_limit: bool = False, debug: bool = False) -> str:
     set_work_dir(work_dir, bypass_work_dir_limit)
     
     config = load_config()
@@ -394,10 +438,14 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
                 client=client,
                 model=model,
                 messages=messages,
-                tools=filtered_tools
+                tools=filtered_tools,
+                debug=debug
             )
         except Exception as e:
             return f"OpenAI API error: {str(e)}"
+        
+        if response is None or not hasattr(response, 'choices') or not response.choices:
+            return "OpenAI API error: Invalid response from API"
         
         message = response.choices[0].message
         

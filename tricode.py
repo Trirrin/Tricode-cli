@@ -30,6 +30,12 @@ Examples:
     )
     
     parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show API request and response details"
+    )
+    
+    parser.add_argument(
         "--stdio",
         action="store_true",
         help="Output all messages in JSON format for programmatic integration"
@@ -97,7 +103,8 @@ Examples:
             bypass_work_dir_limit=args.bypass_work_directory_limit,
             allowed_tools=allowed_tools,
             override_system_prompt=args.override_system_prompt,
-            resume_session_id=args.resume
+            resume_session_id=args.resume,
+            debug=args.debug
         )
         return
     
@@ -118,7 +125,8 @@ Examples:
         resume_session_id=args.resume,
         allowed_tools=allowed_tools,
         work_dir=args.work_dir,
-        bypass_work_dir_limit=args.bypass_work_directory_limit
+        bypass_work_dir_limit=args.bypass_work_directory_limit,
+        debug=args.debug
     )
     
     if result:

@@ -80,6 +80,13 @@ Examples:
     )
     
     parser.add_argument(
+        "--provider",
+        type=str,
+        metavar="NAME",
+        help="Specify which provider to use (e.g., 'openai', 'anthropic'). If not specified, uses default_provider from config."
+    )
+    
+    parser.add_argument(
         "--tui",
         action="store_true",
         help="Launch interactive TUI (Text User Interface) mode"
@@ -104,7 +111,8 @@ Examples:
             allowed_tools=allowed_tools,
             override_system_prompt=args.override_system_prompt,
             resume_session_id=args.resume,
-            debug=args.debug
+            debug=args.debug,
+            provider_name=args.provider
         )
         return
     
@@ -126,7 +134,8 @@ Examples:
         allowed_tools=allowed_tools,
         work_dir=args.work_dir,
         bypass_work_dir_limit=args.bypass_work_directory_limit,
-        debug=args.debug
+        debug=args.debug,
+        provider_name=args.provider
     )
     
     if result:

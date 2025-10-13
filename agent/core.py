@@ -4,10 +4,123 @@ import uuid
 import time
 from pathlib import Path
 from datetime import datetime
+from typing import Union, Any
 from openai import OpenAI, APITimeoutError, RateLimitError, APIConnectionError, InternalServerError
+from anthropic import Anthropic, APIError as AnthropicAPIError, RateLimitError as AnthropicRateLimitError
 from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, get_plan_reminder, get_plan_final_reminder, set_session_id, restore_plan, set_work_dir, WORK_DIR
-from .config import load_config, CONFIG_FILE
+from .config import load_config, get_provider_config, CONFIG_FILE
 from .output import HumanWriter, JsonWriter
+
+def convert_tools_to_anthropic(openai_tools: list) -> list:
+    anthropic_tools = []
+    for tool in openai_tools:
+        if tool.get("type") == "function":
+            func = tool["function"]
+            anthropic_tools.append({
+                "name": func["name"],
+                "description": func.get("description", ""),
+                "input_schema": func.get("parameters", {"type": "object", "properties": {}})
+            })
+    return anthropic_tools
+
+def convert_messages_for_anthropic(openai_messages: list) -> tuple[str, list]:
+    system_content = ""
+    anthropic_messages = []
+    
+    for msg in openai_messages:
+        role = msg.get("role")
+        content = msg.get("content", "")
+        
+        if role == "system":
+            system_content = content
+        elif role == "assistant":
+            tool_calls = msg.get("tool_calls")
+            if tool_calls:
+                converted_content = []
+                if content:
+                    converted_content.append({"type": "text", "text": content})
+                for tc in tool_calls:
+                    converted_content.append({
+                        "type": "tool_use",
+                        "id": tc["id"],
+                        "name": tc["function"]["name"],
+                        "input": json.loads(tc["function"]["arguments"])
+                    })
+                anthropic_messages.append({"role": "assistant", "content": converted_content})
+            else:
+                anthropic_messages.append({"role": "assistant", "content": content})
+        elif role == "tool":
+            tool_call_id = msg.get("tool_call_id")
+            anthropic_messages.append({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": tool_call_id,
+                    "content": content
+                }]
+            })
+        elif role == "user":
+            anthropic_messages.append({"role": "user", "content": content})
+    
+    return system_content, anthropic_messages
+
+def convert_anthropic_to_openai_response(anthropic_response: Any, model: str) -> Any:
+    class OpenAIMessage:
+        def __init__(self, content: str = None, tool_calls: list = None):
+            self.role = "assistant"
+            self.content = content
+            self.tool_calls = tool_calls
+    
+    class OpenAIChoice:
+        def __init__(self, message):
+            self.message = message
+            self.finish_reason = "stop"
+    
+    class OpenAIResponse:
+        def __init__(self, id: str, model: str, choices: list, usage: dict = None):
+            self.id = id
+            self.model = model
+            self.choices = choices
+            self.usage = usage
+    
+    class ToolCall:
+        def __init__(self, id: str, name: str, arguments: str):
+            self.id = id
+            self.type = "function"
+            self.function = type('Function', (), {'name': name, 'arguments': arguments})()
+    
+    content_text = ""
+    tool_calls = []
+    
+    for block in anthropic_response.content:
+        if block.type == "text":
+            content_text += block.text
+        elif block.type == "tool_use":
+            tool_calls.append(ToolCall(
+                id=block.id,
+                name=block.name,
+                arguments=json.dumps(block.input)
+            ))
+    
+    message = OpenAIMessage(
+        content=content_text if content_text else None,
+        tool_calls=tool_calls if tool_calls else None
+    )
+    
+    usage = None
+    if hasattr(anthropic_response, 'usage'):
+        usage = type('Usage', (), {
+            'prompt_tokens': anthropic_response.usage.input_tokens,
+            'completion_tokens': anthropic_response.usage.output_tokens,
+            'total_tokens': anthropic_response.usage.input_tokens + anthropic_response.usage.output_tokens
+        })()
+    
+    return OpenAIResponse(
+        id=anthropic_response.id,
+        model=model,
+        choices=[OpenAIChoice(message)],
+        usage=usage
+    )
 
 def call_openai_with_retry(client, model: str, messages: list, tools: list, max_retries: int = 3, stream: bool = False, debug: bool = False):
     retryable_errors = (APITimeoutError, RateLimitError, APIConnectionError, InternalServerError)
@@ -75,6 +188,193 @@ def call_openai_with_retry(client, model: str, messages: list, tools: list, max_
             time.sleep(delay)
         except Exception:
             raise
+
+def convert_anthropic_stream_to_openai(anthropic_stream, model: str):
+    class StreamDelta:
+        def __init__(self, content: str = None, tool_calls: list = None):
+            self.content = content
+            self.tool_calls = tool_calls
+    
+    class StreamChoice:
+        def __init__(self, delta, index: int = 0):
+            self.delta = delta
+            self.index = index
+            self.finish_reason = None
+    
+    class StreamChunk:
+        def __init__(self, id: str, model: str, choices: list, usage=None):
+            self.id = id
+            self.model = model
+            self.choices = choices
+            self.usage = usage
+    
+    class ToolCallDelta:
+        def __init__(self, index: int, id: str = None, function=None):
+            self.index = index
+            self.id = id
+            self.function = function
+    
+    class FunctionDelta:
+        def __init__(self, name: str = None, arguments: str = None):
+            self.name = name
+            self.arguments = arguments
+    
+    tool_use_blocks = {}
+    
+    for event in anthropic_stream:
+        if event.type == "message_start":
+            yield StreamChunk(
+                id=event.message.id,
+                model=model,
+                choices=[StreamChoice(StreamDelta())],
+                usage=None
+            )
+        elif event.type == "content_block_start":
+            if event.content_block.type == "tool_use":
+                tool_use_blocks[event.index] = {
+                    "id": event.content_block.id,
+                    "name": event.content_block.name,
+                    "input": ""
+                }
+                func_delta = FunctionDelta(name=event.content_block.name)
+                tc_delta = ToolCallDelta(index=event.index, id=event.content_block.id, function=func_delta)
+                yield StreamChunk(
+                    id="",
+                    model=model,
+                    choices=[StreamChoice(StreamDelta(tool_calls=[tc_delta]))],
+                    usage=None
+                )
+        elif event.type == "content_block_delta":
+            if event.delta.type == "text_delta":
+                yield StreamChunk(
+                    id="",
+                    model=model,
+                    choices=[StreamChoice(StreamDelta(content=event.delta.text))],
+                    usage=None
+                )
+            elif event.delta.type == "input_json_delta":
+                tool_block = tool_use_blocks[event.index]
+                tool_block["input"] += event.delta.partial_json
+                func_delta = FunctionDelta(arguments=event.delta.partial_json)
+                tc_delta = ToolCallDelta(index=event.index, function=func_delta)
+                yield StreamChunk(
+                    id="",
+                    model=model,
+                    choices=[StreamChoice(StreamDelta(tool_calls=[tc_delta]))],
+                    usage=None
+                )
+        elif event.type == "message_delta":
+            if event.usage:
+                usage = type('Usage', (), {
+                    'prompt_tokens': 0,
+                    'completion_tokens': event.usage.output_tokens,
+                    'total_tokens': event.usage.output_tokens
+                })()
+                yield StreamChunk(
+                    id="",
+                    model=model,
+                    choices=[],
+                    usage=usage
+                )
+        elif event.type == "message_stop":
+            if hasattr(event, 'message') and hasattr(event.message, 'usage'):
+                usage = type('Usage', (), {
+                    'prompt_tokens': event.message.usage.input_tokens,
+                    'completion_tokens': event.message.usage.output_tokens,
+                    'total_tokens': event.message.usage.input_tokens + event.message.usage.output_tokens
+                })()
+                yield StreamChunk(
+                    id="",
+                    model=model,
+                    choices=[],
+                    usage=usage
+                )
+
+def call_anthropic_with_retry(client: Anthropic, model: str, messages: list, tools: list, max_retries: int = 3, stream: bool = False, debug: bool = False):
+    retryable_errors = (AnthropicAPIError, AnthropicRateLimitError)
+    
+    for attempt in range(max_retries + 1):
+        try:
+            system_content, anthropic_messages = convert_messages_for_anthropic(messages)
+            anthropic_tools = convert_tools_to_anthropic(tools)
+            
+            kwargs = {
+                "model": model,
+                "messages": anthropic_messages,
+                "max_tokens": 4096
+            }
+            
+            if system_content:
+                kwargs["system"] = system_content
+            
+            if anthropic_tools:
+                kwargs["tools"] = anthropic_tools
+            
+            if stream:
+                kwargs["stream"] = True
+            
+            if debug:
+                print("\n" + "="*80, flush=True)
+                print("[DEBUG] Anthropic API Request:", flush=True)
+                print("="*80, flush=True)
+                print(f"Model: {model}", flush=True)
+                print(f"System: {system_content[:500] if len(system_content) > 500 else system_content}", flush=True)
+                print(f"Messages ({len(anthropic_messages)}):", flush=True)
+                for i, msg in enumerate(anthropic_messages[:3]):
+                    print(f"\n  [{i}] Role: {msg.get('role', 'unknown')}", flush=True)
+                    content = msg.get('content', '')
+                    if isinstance(content, str):
+                        if len(content) > 300:
+                            print(f"  Content: {content[:300]}... (truncated)", flush=True)
+                        else:
+                            print(f"  Content: {content}", flush=True)
+                    else:
+                        print(f"  Content: {len(content)} blocks", flush=True)
+                if len(anthropic_messages) > 3:
+                    print(f"\n  ... and {len(anthropic_messages) - 3} more messages", flush=True)
+                print(f"\nTools: {len(anthropic_tools)} available", flush=True)
+                print("="*80 + "\n", flush=True)
+            
+            response = client.messages.create(**kwargs)
+            
+            if stream:
+                return convert_anthropic_stream_to_openai(response, model)
+            
+            if debug:
+                print("\n" + "="*80, flush=True)
+                print("[DEBUG] Anthropic API Response:", flush=True)
+                print("="*80, flush=True)
+                print(f"Response ID: {response.id}", flush=True)
+                print(f"Model: {response.model}", flush=True)
+                print(f"Usage: input={response.usage.input_tokens}, output={response.usage.output_tokens}", flush=True)
+                print(f"Stop reason: {response.stop_reason}", flush=True)
+                for i, block in enumerate(response.content):
+                    if block.type == "text":
+                        text = block.text
+                        if len(text) > 300:
+                            print(f"Content[{i}] (text): {text[:300]}... (truncated)", flush=True)
+                        else:
+                            print(f"Content[{i}] (text): {text}", flush=True)
+                    elif block.type == "tool_use":
+                        print(f"Content[{i}] (tool_use): {block.name}", flush=True)
+                print("="*80 + "\n", flush=True)
+            
+            converted_response = convert_anthropic_to_openai_response(response, model)
+            return converted_response
+        except retryable_errors as e:
+            if attempt == max_retries:
+                raise
+            delay = 2 ** attempt
+            time.sleep(delay)
+        except Exception:
+            raise
+
+def call_llm_api(client: Union[OpenAI, Anthropic], model: str, messages: list, tools: list, 
+                 provider: str = "openai", max_retries: int = 3, stream: bool = False, debug: bool = False):
+    if provider == "anthropic":
+        return call_anthropic_with_retry(client, model, messages, tools, max_retries, stream, debug)
+    else:
+        return call_openai_with_retry(client, model, messages, tools, max_retries, stream, debug)
 
 def get_session_dir() -> Path:
     session_dir = Path.home() / ".tricode" / "session"
@@ -280,23 +580,23 @@ def build_tools_description(allowed_tools: list = None) -> str:
     
     return "\n".join(lines)
 
-def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, override_system_prompt: bool = False, resume_session_id: str = None, allowed_tools: list = None, work_dir: str = None, bypass_work_dir_limit: bool = False, debug: bool = False) -> str:
+def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, override_system_prompt: bool = False, resume_session_id: str = None, allowed_tools: list = None, work_dir: str = None, bypass_work_dir_limit: bool = False, debug: bool = False, provider_name: str = None) -> str:
     set_work_dir(work_dir, bypass_work_dir_limit)
     
-    config = load_config()
+    try:
+        provider_config = get_provider_config(provider_name)
+    except ValueError as e:
+        return f"Error: {e}"
     
-    api_key = config.get("openai_api_key")
-    if not api_key:
-        return f"Error: openai_api_key not configured in {CONFIG_FILE}"
+    api_key = provider_config["api_key"]
+    base_url = provider_config["base_url"]
+    provider = provider_config["provider"]
+    model = provider_config["model"]
     
-    model = config.get("openai_model", "gpt-4o-mini")
-    base_url = config.get("openai_base_url")
-    
-    client_kwargs = {"api_key": api_key}
-    if base_url:
-        client_kwargs["base_url"] = base_url
-    
-    client = OpenAI(**client_kwargs)
+    if provider == "anthropic":
+        client = Anthropic(api_key=api_key, base_url=base_url)
+    else:
+        client = OpenAI(api_key=api_key, base_url=base_url)
     
     writer = JsonWriter() if stdio_mode else HumanWriter(verbose)
     
@@ -434,11 +734,12 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
         writer.write_round(round_num)
         
         try:
-            response = call_openai_with_retry(
+            response = call_llm_api(
                 client=client,
                 model=model,
                 messages=messages,
                 tools=filtered_tools,
+                provider=provider,
                 debug=debug
             )
         except Exception as e:

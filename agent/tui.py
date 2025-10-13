@@ -5,6 +5,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import Iterator
 from openai import OpenAI
+from anthropic import Anthropic
+from typing import Union
 import tiktoken
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, TextArea, RichLog, Static, ListView, ListItem, Label
@@ -16,8 +18,8 @@ from textual.screen import ModalScreen
 from rich.markdown import Markdown
 from rich.text import Text
 from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, set_session_id, set_work_dir, restore_plan
-from .config import load_config
-from .core import load_session, save_session, get_session_dir, filter_tools_schema, build_tools_description, load_agents_md, format_tool_result, call_openai_with_retry
+from .config import load_config, get_provider_config
+from .core import load_session, save_session, get_session_dir, filter_tools_schema, build_tools_description, load_agents_md, format_tool_result, call_llm_api
 
 
 def get_available_sessions() -> list:
@@ -276,13 +278,14 @@ class CustomTextArea(TextArea):
 
 
 class AgentSession:
-    def __init__(self, session_id: str, messages: list, client: OpenAI, model: str, allowed_tools: list = None, debug: bool = False):
+    def __init__(self, session_id: str, messages: list, client: Union[OpenAI, Anthropic], model: str, provider: str = "openai", allowed_tools: list = None, debug: bool = False):
         self.session_id = session_id
         self.messages = messages
         self.client = client
         self.model = model
+        self.provider = provider
         self.filtered_tools = filter_tools_schema(allowed_tools)
-        self.debug = debug
+        self.debug_mode = debug
         self.input_tokens = 0
         self.output_tokens = 0
         self.total_tokens = 0
@@ -346,13 +349,14 @@ class AgentSession:
             yield {"type": "round", "number": round_num}
             
             try:
-                stream = call_openai_with_retry(
+                stream = call_llm_api(
                     client=self.client,
                     model=self.model,
                     messages=self.messages,
                     tools=self.filtered_tools,
+                    provider=self.provider,
                     stream=True,
-                    debug=self.debug
+                    debug=self.debug_mode
                 )
             except Exception as e:
                 yield {"type": "error", "content": f"OpenAI API error: {str(e)}"}
@@ -558,14 +562,14 @@ class TricodeApp(App):
     ]
     
     def __init__(self, config: dict, work_dir: str = None, bypass_work_dir_limit: bool = False, 
-                 allowed_tools: list = None, override_system_prompt: bool = False, resume_session_id: str = None, debug: bool = False):
+                 allowed_tools: list = None, override_system_prompt: bool = False, resume_session_id: str = None, debug: bool = False, provider_name: str = None):
         super().__init__()
         self.config = config
         self.work_dir = work_dir
         self.bypass_work_dir_limit = bypass_work_dir_limit
         self.allowed_tools = allowed_tools
         self.override_system_prompt = override_system_prompt
-        self.debug = debug
+        self.debug_mode = debug
         self.agent_running = False
         self.cancel_requested = False
         self.spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
@@ -575,16 +579,21 @@ class TricodeApp(App):
         
         set_work_dir(work_dir, bypass_work_dir_limit)
         
-        api_key = config.get("openai_api_key")
-        model = config.get("openai_model", "gpt-4o-mini")
-        base_url = config.get("openai_base_url")
+        try:
+            provider_config = get_provider_config(provider_name)
+        except ValueError as e:
+            print(f"Error: {e}")
+            exit(1)
         
-        client_kwargs = {"api_key": api_key}
-        if base_url:
-            client_kwargs["base_url"] = base_url
+        api_key = provider_config["api_key"]
+        base_url = provider_config["base_url"]
+        self.provider = provider_config["provider"]
+        self.model = provider_config["model"]
         
-        self.client = OpenAI(**client_kwargs)
-        self.model = model
+        if self.provider == "anthropic":
+            self.client = Anthropic(api_key=api_key, base_url=base_url)
+        else:
+            self.client = OpenAI(api_key=api_key, base_url=base_url)
         
         if resume_session_id:
             try:
@@ -592,7 +601,7 @@ class TricodeApp(App):
                 self.session_id = resume_session_id
                 set_session_id(self.session_id)
                 restore_plan(self.session_id)
-                self.session = AgentSession(self.session_id, messages, self.client, self.model, allowed_tools, self.debug)
+                self.session = AgentSession(self.session_id, messages, self.client, self.model, self.provider, allowed_tools, self.debug_mode)
                 self.message_history = [msg.get("content") for msg in messages if msg.get("role") == "user"]
                 self.history_index = -1
             except Exception as e:
@@ -603,8 +612,9 @@ class TricodeApp(App):
                     self._create_initial_messages(), 
                     self.client, 
                     self.model, 
+                    self.provider,
                     allowed_tools,
-                    self.debug
+                    self.debug_mode
                 )
                 self.message_history = []
                 self.history_index = -1
@@ -616,8 +626,9 @@ class TricodeApp(App):
                 self._create_initial_messages(), 
                 self.client, 
                 self.model, 
+                self.provider,
                 allowed_tools,
-                self.debug
+                self.debug_mode
             )
             self.message_history = []
             self.history_index = -1
@@ -900,8 +911,9 @@ class TricodeApp(App):
             self._create_initial_messages(), 
             self.client, 
             self.model, 
+            self.provider,
             self.allowed_tools,
-            self.debug
+            self.debug_mode
         )
         
         self.message_history = []
@@ -939,8 +951,9 @@ class TricodeApp(App):
                         messages,
                         self.client,
                         self.model,
+                        self.provider,
                         self.allowed_tools,
-                        self.debug
+                        self.debug_mode
                     )
                     
                     hist_input, hist_output, hist_total = self.session.calculate_history_tokens()
@@ -1012,15 +1025,8 @@ class TricodeApp(App):
 
 
 def run_tui(work_dir: str = None, bypass_work_dir_limit: bool = False, allowed_tools: list = None, 
-            override_system_prompt: bool = False, resume_session_id: str = None, debug: bool = False):
-    from .config import CONFIG_FILE
-    
+            override_system_prompt: bool = False, resume_session_id: str = None, debug: bool = False, provider_name: str = None):
     config = load_config()
-    
-    api_key = config.get("openai_api_key")
-    if not api_key:
-        print(f"Error: openai_api_key not configured in {CONFIG_FILE}")
-        return
     
     app = TricodeApp(
         config=config,
@@ -1029,7 +1035,8 @@ def run_tui(work_dir: str = None, bypass_work_dir_limit: bool = False, allowed_t
         allowed_tools=allowed_tools,
         override_system_prompt=override_system_prompt,
         resume_session_id=resume_session_id,
-        debug=debug
+        debug=debug,
+        provider_name=provider_name
     )
     
     app.run()

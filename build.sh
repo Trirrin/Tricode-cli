@@ -12,6 +12,16 @@ fi
 rm -rf dist build __pycache__
 
 # 打包，去除控制台窗口，生成单文件（可调整参数）
+# 使用 spec 文件以包含 tiktoken 数据文件
+if [ -f tricode.spec ]; then
+    pyinstaller tricode.spec
+else
+    pyinstaller --onefile --name tricode \
+        --hidden-import=tiktoken_ext \
+        --hidden-import=tiktoken_ext.openai_public \
+        --collect-data tiktoken_ext \
+        tricode.py
+fi
 pyinstaller --onefile --name tricode tricode.py
 
 echo "打包完成，二进制文件位于 dist/tricode"

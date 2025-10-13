@@ -2,7 +2,7 @@
 
 > Tribbie,Trianne and Trinnon are so cute🥰
 
-An autonomous AI-powered command-line agent for file operations, powered by OpenAI.
+A command-line universal agent
 
 ## Features
 

@@ -769,6 +769,12 @@ def format_tool_result(tool_name: str, success: bool, result: str, arguments: di
             return "[OK] 0 items"
         items = result.count('\n') + 1 if result else 0
         return f"[OK] {items} items"
+    elif tool_name == "delete_file":
+        return result
+    elif tool_name == "delete_path":
+        return result
+    elif tool_name == "mkdir":
+        return result
     elif tool_name == "plan":
         return result
     elif tool_name == "run_command":
@@ -821,6 +827,9 @@ TOOL_DESCRIPTIONS = {
     "create_file": "Create new files",
     "edit_file": "Modify existing files",
     "list_directory": "List directory contents",
+    "delete_file": "Delete a single file or symlink",
+    "delete_path": "Delete a file or directory (recursive optional)",
+    "mkdir": "Create a directory (parents/exist_ok)",
     "run_command": "Execute shell commands",
     "start_session": "Start interactive shell session (for SSH, Python REPL, etc.)",
     "send_input": "Send commands to an active session",

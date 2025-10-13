@@ -127,7 +127,7 @@ Features:
 - `-v, --verbose`: Show detailed execution logs
 - `--stdio`: Output all messages in JSON format for programmatic integration
 - `--tools <list>`: Comma-separated list of allowed tools (e.g., `read_file,search_context`)
-  - Available tools: `search_context`, `read_file`, `create_file`, `edit_file`, `list_directory`, `run_command`, `plan`, `start_session`, `send_input`, `read_output`, `close_session`, `list_sessions`, `web_search`, `fetch_url`
+  - Available tools: `search_context`, `read_file`, `create_file`, `edit_file`, `list_directory`, `delete_file`, `delete_path`, `mkdir`, `run_command`, `plan`, `start_session`, `send_input`, `read_output`, `close_session`, `list_sessions`, `web_search`, `fetch_url`
   - If not specified, all tools are available
   - Note: `plan` tool is automatically included (required for agent operation)
   - Agent only sees and uses whitelisted tools; system prompt adapts dynamically

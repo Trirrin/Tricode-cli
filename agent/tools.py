@@ -1,4 +1,5 @@
 import os
+import shutil
 import re
 import subprocess
 import tempfile
@@ -150,6 +151,33 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "mkdir",
+            "description": "Create a directory. Supports creating parents and handling existing paths.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The directory path to create"
+                    },
+                    "parents": {
+                        "type": "boolean",
+                        "description": "Create parent directories as needed (like -p)",
+                        "default": True
+                    },
+                    "exist_ok": {
+                        "type": "boolean",
+                        "description": "Do not error if directory already exists",
+                        "default": False
+                    }
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_file",
             "description": "Read file content, optionally reading only specified line ranges",
             "parameters": {
@@ -253,6 +281,45 @@ TOOLS_SCHEMA = [
                     }
                 },
                 "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_file",
+            "description": "Delete a file or symlink. Fails if the path is a directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The file path to delete"
+                    }
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_path",
+            "description": "Delete a file or directory. For directories, set recursive=true to remove non-empty trees.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The path to delete (file or directory)"
+                    },
+                    "recursive": {
+                        "type": "boolean",
+                        "description": "Recursively delete non-empty directories",
+                        "default": False
+                    }
+                },
+                "required": ["path"]
             }
         }
     },
@@ -496,6 +563,35 @@ def _fallback_search(pattern: str, path: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Fallback search failed: {str(e)}"
 
+def delete_path(path: str, recursive: bool = False) -> Tuple[bool, str]:
+    """Delete a file or a directory. For directories, allow recursive removal when requested."""
+    resolved_path = resolve_path(path)
+    valid, err_msg = validate_path(resolved_path)
+    if not valid:
+        return False, err_msg
+    try:
+        if not os.path.exists(resolved_path) and not os.path.islink(resolved_path):
+            return False, f"Path not found: {resolved_path}"
+        if os.path.realpath(resolved_path) == os.path.realpath(WORK_DIR):
+            return False, f"Refusing to delete the work directory root: {resolved_path}"
+        if os.path.isfile(resolved_path) or os.path.islink(resolved_path):
+            os.unlink(resolved_path)
+            return True, f"Deleted file: {resolved_path}"
+        if os.path.isdir(resolved_path):
+            if recursive:
+                shutil.rmtree(resolved_path)
+                return True, f"Deleted directory recursively: {resolved_path}"
+            else:
+                os.rmdir(resolved_path)
+                return True, f"Deleted empty directory: {resolved_path}"
+        return False, f"Unsupported path type: {resolved_path}"
+    except PermissionError as e:
+        return False, f"Permission denied: {resolved_path}: {str(e)}"
+    except OSError as e:
+        return False, f"Delete failed: {resolved_path}: {str(e)}"
+    except Exception as e:
+        return False, f"Delete failed: {str(e)}"
+
 def read_file(path: str, ranges: list = None) -> Tuple[bool, str]:
     resolved_path = resolve_path(path)
     valid, err_msg = validate_path(resolved_path)
@@ -519,6 +615,58 @@ def read_file(path: str, ranges: list = None) -> Tuple[bool, str]:
         return False, f"File not found: {resolved_path}"
     except Exception as e:
         return False, f"Read failed: {str(e)}"
+
+def delete_file(path: str) -> Tuple[bool, str]:
+    """Delete a single file or symlink. Directories are not allowed here."""
+    resolved_path = resolve_path(path)
+    valid, err_msg = validate_path(resolved_path)
+    if not valid:
+        return False, err_msg
+    try:
+        if not os.path.exists(resolved_path) and not os.path.islink(resolved_path):
+            return False, f"File not found: {resolved_path}"
+        if os.path.isdir(resolved_path) and not os.path.islink(resolved_path):
+            return False, f"Is a directory: {resolved_path}. Use delete_path for directories."
+        os.unlink(resolved_path)
+        return True, f"Deleted file: {resolved_path}"
+    except PermissionError as e:
+        return False, f"Permission denied: {resolved_path}: {str(e)}"
+    except Exception as e:
+        return False, f"Delete failed: {str(e)}"
+
+def mkdir(path: str, parents: bool = True, exist_ok: bool = False) -> Tuple[bool, str]:
+    """Create a directory with optional parents and exist_ok semantics."""
+    resolved_path = resolve_path(path)
+    valid, err_msg = validate_path(resolved_path)
+    if not valid:
+        return False, err_msg
+    try:
+        # If path exists already
+        if os.path.exists(resolved_path):
+            if os.path.isdir(resolved_path):
+                if exist_ok:
+                    return True, f"Directory exists: {resolved_path}"
+                return False, f"Directory already exists: {resolved_path}"
+            return False, f"Path exists and is not a directory: {resolved_path}"
+
+        # Create directory tree or single dir based on parents flag
+        if parents:
+            os.makedirs(resolved_path, exist_ok=exist_ok)
+        else:
+            # If parent doesn't exist and parents=False, this will raise
+            if exist_ok and os.path.isdir(resolved_path):
+                return True, f"Directory exists: {resolved_path}"
+            os.mkdir(resolved_path)
+
+        return True, f"Created directory: {resolved_path}"
+    except PermissionError as e:
+        return False, f"Permission denied: {resolved_path}: {str(e)}"
+    except FileExistsError:
+        if exist_ok:
+            return True, f"Directory exists: {resolved_path}"
+        return False, f"Directory already exists: {resolved_path}"
+    except Exception as e:
+        return False, f"Create directory failed: {str(e)}"
 
 def create_file(path: str, content: str) -> Tuple[bool, str]:
     resolved_path = resolve_path(path)
@@ -1143,6 +1291,25 @@ def format_tool_call(name: str, arguments: dict) -> str:
     elif name == "list_directory":
         path = arguments.get("path", ".")
         return f'LIST("{path}")'
+    elif name == "delete_file":
+        path = arguments.get("path", "")
+        return f'DELETE FILE("{path}")'
+    elif name == "delete_path":
+        path = arguments.get("path", "")
+        recursive = arguments.get("recursive", False)
+        suffix = ", recursive=True" if recursive else ""
+        return f'DELETE PATH("{path}"{suffix})'
+    elif name == "mkdir":
+        path = arguments.get("path", "")
+        parents = arguments.get("parents", True)
+        exist_ok = arguments.get("exist_ok", False)
+        flags = []
+        if parents:
+            flags.append("parents=True")
+        if exist_ok:
+            flags.append("exist_ok=True")
+        flag_str = ", " + ", ".join(flags) if flags else ""
+        return f'MKDIR("{path}"{flag_str})'
     elif name == "plan":
         action = arguments.get("action", "").upper()
         return f'PLAN {action}'
@@ -1184,7 +1351,7 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
             "or plan(action='skip', reason='...') for simple tasks."
         )
     
-    significant_action_tools = ["read_file", "edit_file", "create_file", "run_command"]
+    significant_action_tools = ["read_file", "edit_file", "create_file", "delete_file", "delete_path", "mkdir", "run_command"]
     if name in significant_action_tools and CURRENT_PLAN is not None:
         SIGNIFICANT_ACTIONS_COUNT += 1
     
@@ -1212,6 +1379,21 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
         return list_directory(
             arguments.get("path", "."),
             arguments.get("show_hidden", True)
+        )
+    elif name == "delete_file":
+        return delete_file(
+            arguments.get("path")
+        )
+    elif name == "delete_path":
+        return delete_path(
+            arguments.get("path"),
+            arguments.get("recursive", False)
+        )
+    elif name == "mkdir":
+        return mkdir(
+            arguments.get("path"),
+            arguments.get("parents", True),
+            arguments.get("exist_ok", False)
         )
     elif name == "plan":
         return plan(

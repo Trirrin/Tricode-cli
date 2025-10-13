@@ -127,7 +127,7 @@ export TRICODE_OPENAI_MODEL="gpt-4o"
 - `-v, --verbose`：显示详细执行日志
 - `--stdio`：以 JSON 格式输出所有消息，便于程序化集成
 - `--tools <list>`：逗号分隔的允许工具列表（例如 `read_file,search_context`）
-  - 可用工具：`search_context`、`read_file`、`create_file`、`edit_file`、`list_directory`、`run_command`、`plan`、`start_session`、`send_input`、`read_output`、`close_session`、`list_sessions`、`web_search`、`fetch_url`
+  - 可用工具：`search_context`、`read_file`、`create_file`、`edit_file`、`list_directory`、`delete_file`、`delete_path`、`mkdir`、`run_command`、`plan`、`start_session`、`send_input`、`read_output`、`close_session`、`list_sessions`、`web_search`、`fetch_url`
   - 如果未指定，则所有工具都可用
   - 注意：`plan` 工具会自动包含（Agent 运行必需）
   - Agent 只能看到和使用白名单内的工具；系统提示词会动态调整

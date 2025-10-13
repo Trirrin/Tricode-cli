@@ -1,13 +1,35 @@
 #!/usr/bin/env python
 
 import argparse
+import sys
 from agent import run_agent, list_conversations
 from agent.tui import run_tui
+
+try:
+    from version import get_runtime_version, get_full_version_string, __version__, __commit_id__
+except ImportError:
+    # Fallback for development mode without build
+    __version__ = "dev"
+    __commit_id__ = "unknown"
+    def get_runtime_version():
+        return f"Tricode-cli {__version__} (git-{__commit_id__})"
+    def get_full_version_string():
+        return f"Tricode-cli {__version__} (git-{__commit_id__})"
+
+
+class VersionedHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """Custom help formatter that includes version info in the header"""
+    def format_help(self):
+        # Get the original help text
+        help_text = super().format_help()
+        # Add version info at the beginning
+        version_line = f"{get_runtime_version()}\n\n"
+        return version_line + help_text
 
 def main():
     parser = argparse.ArgumentParser(
         description="Autonomous AI agent with file operation capabilities",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=VersionedHelpFormatter,
         epilog="""
 Examples:
   tricode "Find all TODO comments in the codebase"
@@ -17,10 +39,17 @@ Examples:
     )
     
     parser.add_argument(
+        "--version",
+        action="version",
+        version=get_runtime_version(),
+        help="Show version information and exit"
+    )
+    
+    parser.add_argument(
         "prompt",
         type=str,
         nargs='?',
-        help="Natural language instruction for the agent"
+        help="Natural language instruction for the agent (omit for TUI mode with --tui)"
     )
     
     parser.add_argument(

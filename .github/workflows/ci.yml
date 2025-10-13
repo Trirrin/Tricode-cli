@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - '**'
+    tags:
+      - 'v*'
   release:
     types: [created]
 
@@ -14,6 +16,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 获取完整的 git 历史，确保能获取 commit 信息
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -25,16 +29,30 @@ jobs:
           pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install pyinstaller
+      - name: Determine version
+        id: version
+        run: |
+          # 获取版本号：优先使用 tag，其次使用 release tag，最后默认为 dev
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            VERSION=${{ github.event.release.tag_name }}
+          else
+            VERSION="dev-${GITHUB_SHA:0:7}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "构建版本: $VERSION"
 
       - name: Build with PyInstaller
         run: |
-          pyinstaller tricode.spec || pyinstaller --onefile tricode.py
+          chmod +x build.sh
+          ./build.sh ${{ steps.version.outputs.version }}
 
       - name: Upload artifact
         if: github.event_name != 'release'
         uses: actions/upload-artifact@v4
         with:
-          name: pyinstaller-dist
+          name: tricode-${{ steps.version.outputs.version }}
           path: dist/
 
       - name: Upload to release

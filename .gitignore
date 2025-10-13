@@ -1,2 +1,9 @@
 dist/
 build/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+tricode_versioned.spec
+version.py

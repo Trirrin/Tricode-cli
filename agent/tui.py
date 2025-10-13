@@ -607,7 +607,7 @@ class AgentSession:
             save_session(self.session_id, self.messages)
 
 
-class TricodeApp(App):
+class TricodeCLI(App):
     CSS = """
     Screen {
         layout: vertical;
@@ -1196,7 +1196,7 @@ def run_tui(work_dir: str = None, bypass_work_dir_limit: bool = False, allowed_t
             override_system_prompt: bool = False, resume_session_id: str = None, debug: bool = False, provider_name: str = None):
     config = load_config()
     
-    app = TricodeApp(
+    app = TricodeCLI(
         config=config,
         work_dir=work_dir,
         bypass_work_dir_limit=bypass_work_dir_limit,

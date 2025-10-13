@@ -17,6 +17,7 @@ import requests
 import html2text
 from bs4 import BeautifulSoup
 from ddgs import DDGS
+import difflib
 
 CURRENT_PLAN = None
 CURRENT_SESSION_ID = None
@@ -555,8 +556,9 @@ def edit_file(path: str, replacements: list) -> Tuple[bool, str]:
     
     try:
         with open(resolved_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
+            original_lines = f.readlines()
         
+        lines = original_lines.copy()
         sorted_replacements = sorted(replacements, key=lambda r: r["range"][0], reverse=True)
         
         for replacement in sorted_replacements:
@@ -582,7 +584,23 @@ def edit_file(path: str, replacements: list) -> Tuple[bool, str]:
             tmp_path = tmp.name
         
         os.rename(tmp_path, resolved_path)
-        return True, f"Successfully edited {resolved_path}"
+        
+        diff = difflib.unified_diff(
+            original_lines,
+            lines,
+            fromfile=f"a/{os.path.basename(resolved_path)}",
+            tofile=f"b/{os.path.basename(resolved_path)}",
+            lineterm=''
+        )
+        diff_text = '\n'.join(diff)
+        
+        result = {
+            "success": True,
+            "path": resolved_path,
+            "diff": diff_text
+        }
+        
+        return True, json.dumps(result)
     except FileNotFoundError:
         return False, f"File not found: {resolved_path}"
     except Exception as e:

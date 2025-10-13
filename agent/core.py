@@ -10,6 +10,252 @@ from anthropic import Anthropic, APIError as AnthropicAPIError, RateLimitError a
 from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, get_plan_reminder, get_plan_final_reminder, set_session_id, restore_plan, set_work_dir, WORK_DIR
 from .config import load_config, get_provider_config, CONFIG_FILE
 from .output import HumanWriter, JsonWriter
+import difflib
+
+def _render_beautiful_diff(diff_text: str, max_lines: int = 50) -> str:
+    if not diff_text:
+        return ""
+    
+    lines = diff_text.split('\n')
+    result = []
+    
+    file_header = []
+    for i, line in enumerate(lines):
+        if line.startswith('---') or line.startswith('+++'):
+            file_header.append(line)
+        elif line.startswith('@@'):
+            diff_content = lines[i:]
+            break
+    else:
+        return diff_text
+    
+    if len(diff_content) > max_lines + 10:
+        diff_content = diff_content[:max_lines]
+        truncated = True
+        remaining_lines = len(lines) - len(file_header) - max_lines
+    else:
+        truncated = False
+        remaining_lines = 0
+    
+    max_line_num = 0
+    line_num_old = None
+    line_num_new = None
+    max_content_width = 0
+    
+    for line in diff_content:
+        if line.startswith('@@'):
+            import re
+            match = re.search(r'@@ -(\d+),?\d* \+(\d+),?\d* @@', line)
+            if match:
+                line_num_old = int(match.group(1))
+                line_num_new = int(match.group(2))
+                max_line_num = max(max_line_num, line_num_old, line_num_new)
+        elif line.startswith('+'):
+            if line_num_new is not None:
+                max_line_num = max(max_line_num, line_num_new)
+                line_num_new += 1
+            max_content_width = max(max_content_width, len(line) - 1)
+        elif line.startswith('-'):
+            if line_num_old is not None:
+                max_line_num = max(max_line_num, line_num_old)
+                line_num_old += 1
+            max_content_width = max(max_content_width, len(line) - 1)
+        elif line.startswith(' '):
+            if line_num_old is not None:
+                max_line_num = max(max_line_num, line_num_old)
+                line_num_old += 1
+            if line_num_new is not None:
+                line_num_new += 1
+            max_content_width = max(max_content_width, len(line) - 1)
+    
+    num_width = len(str(max_line_num))
+    max_content_width = min(max_content_width, 80)
+    
+    line_contents = []
+    line_num_old = None
+    line_num_new = None
+    
+    for line in diff_content:
+        if line.startswith('@@'):
+            import re
+            match = re.search(r'@@ -(\d+),?\d* \+(\d+),?\d* @@', line)
+            if match:
+                line_num_old = int(match.group(1))
+                line_num_new = int(match.group(2))
+            line_contents.append(('header', line, None, None, None))
+        elif line.startswith('+'):
+            old_num = " " * num_width
+            new_num = f"{line_num_new:>{num_width}}" if line_num_new is not None else " " * num_width
+            content = line[1:] if len(line) > 1 else ""
+            line_contents.append(('add', old_num, new_num, '+', content))
+            if line_num_new is not None:
+                line_num_new += 1
+        elif line.startswith('-'):
+            old_num = f"{line_num_old:>{num_width}}" if line_num_old is not None else " " * num_width
+            new_num = " " * num_width
+            content = line[1:] if len(line) > 1 else ""
+            line_contents.append(('del', old_num, new_num, '-', content))
+            if line_num_old is not None:
+                line_num_old += 1
+        elif line.startswith(' '):
+            old_num = f"{line_num_old:>{num_width}}" if line_num_old is not None else " " * num_width
+            new_num = f"{line_num_new:>{num_width}}" if line_num_new is not None else " " * num_width
+            content = line[1:] if len(line) > 1 else ""
+            line_contents.append(('ctx', old_num, new_num, ' ', content))
+            if line_num_old is not None:
+                line_num_old += 1
+            if line_num_new is not None:
+                line_num_new += 1
+    
+    # Utilities: terminal/width helpers and safe wrapping by display width
+    import unicodedata
+
+    def _ambiguous_wide() -> bool:
+        return os.environ.get("TRICODE_WIDE_AMBIGUOUS", "0") in {"1", "true", "TRUE", "yes"}
+
+    def _disp_width(s: str) -> int:
+        if not s:
+            return 0
+        w = 0
+        for ch in s:
+            oc = ord(ch)
+            # control characters (excluding tab handled by expandtabs)
+            if oc < 32 or oc == 127:
+                continue
+            if unicodedata.combining(ch):
+                continue
+            eaw = unicodedata.east_asian_width(ch)
+            if eaw in ("F", "W"):
+                w += 2
+            elif eaw == "A" and _ambiguous_wide():
+                w += 2
+            else:
+                w += 1
+        return w
+
+    def _slice_by_width(s: str, max_w: int) -> tuple[str, str]:
+        if max_w <= 0 or not s:
+            return "", s
+        acc = []
+        w = 0
+        for i, ch in enumerate(s):
+            ch_w = 0
+            oc = ord(ch)
+            if oc < 32 or oc == 127:
+                ch_w = 0
+            elif unicodedata.combining(ch):
+                ch_w = 0
+            else:
+                eaw = unicodedata.east_asian_width(ch)
+                if eaw in ("F", "W"):
+                    ch_w = 2
+                elif eaw == "A" and _ambiguous_wide():
+                    ch_w = 2
+                else:
+                    ch_w = 1
+            if w + ch_w > max_w:
+                return "".join(acc), s[i:]
+            acc.append(ch)
+            w += ch_w
+        return "".join(acc), ""
+
+    # Compute terminal width once and use full width for the box
+    try:
+        import shutil
+        terminal_width = shutil.get_terminal_size().columns
+    except Exception:
+        terminal_width = 80
+
+    # Anchor mode: draw right border at terminal's last column using CSI n G
+    anchor_right = os.environ.get("TRICODE_DIFF_ANCHOR_RIGHT", "0") in {"1", "true", "TRUE", "yes"}
+
+    # Keep borders consistent: "│ <content padded to inner_width> │"
+    box_width = max(20, terminal_width)
+    inner_width = box_width - 4
+    
+    top_border = "\033[90m╭" + "─" * (box_width - 2) + "╮\033[0m"
+    result.append(top_border)
+    
+    for item in line_contents:
+        if item[0] == 'header':
+            raw = item[1].expandtabs(4)
+            rest = raw
+            first = True
+            while True:
+                chunk, rest = _slice_by_width(rest, inner_width if not anchor_right else inner_width * 4)
+                if first and not chunk and rest:
+                    # ensure forward progress even if first char is width>inner
+                    chunk = rest[:1]
+                    rest = rest[1:]
+                first = False
+                if anchor_right:
+                    # Disable wrap, print left border + content, jump to last column, print right border
+                    line = (
+                        f"\033[?7l\033[90m│\033[0m \033[36m{chunk}\033[0m"
+                        f"\033[{box_width}G\033[90m│\033[0m\033[?7h"
+                    )
+                else:
+                    pad = " " * max(0, inner_width - _disp_width(chunk))
+                    line = f"\033[90m│\033[0m \033[36m{chunk}\033[0m{pad} \033[90m│\033[0m"
+                result.append(line)
+                if not rest:
+                    break
+        else:
+            line_type, old_num, new_num, op, text_content = item
+            prefix = f" {old_num} │ {new_num} {op} "
+            # Normalize tabs to keep alignment predictable
+            norm_text = (text_content or "").expandtabs(4)
+            remaining = norm_text
+            first_seg = True
+            while True:
+                line_prefix = prefix if first_seg else (" " * len(prefix))
+                if anchor_right:
+                    # allow a generous slice; no wrap due to anchor mode
+                    chunk, remaining = _slice_by_width(remaining, inner_width * 4)
+                else:
+                    avail = inner_width - _disp_width(line_prefix)
+                    chunk, remaining = _slice_by_width(remaining, avail)
+                # Safety: ensure progress even on pathological characters
+                if first_seg and not chunk and remaining:
+                    chunk = remaining[:1]
+                    remaining = remaining[1:]
+                inner = f"{line_prefix}{chunk}"
+                if anchor_right:
+                    if line_type == 'add':
+                        colored = f"\033[48;2;30;80;30m\033[97m {inner}\033[0m"
+                    elif line_type == 'del':
+                        colored = f"\033[48;2;80;30;30m\033[97m {inner}\033[0m"
+                    else:
+                        colored = f" {inner}"
+                    line = (
+                        f"\033[?7l\033[90m│\033[0m{colored}"
+                        f"\033[{box_width}G\033[90m│\033[0m\033[?7h"
+                    )
+                else:
+                    vis_len = _disp_width(line_prefix) + _disp_width(chunk)
+                    pad = " " * max(0, inner_width - vis_len)
+                    if line_type == 'add':
+                        colored = f"\033[48;2;30;80;30m\033[97m {inner}{pad} \033[0m"
+                    elif line_type == 'del':
+                        colored = f"\033[48;2;80;30;30m\033[97m {inner}{pad} \033[0m"
+                    else:
+                        colored = f" {inner}{pad} "
+                    line = f"\033[90m│\033[0m{colored}\033[90m│\033[0m"
+                result.append(line)
+                first_seg = False
+                if not remaining:
+                    break
+    
+    if truncated:
+        msg = f"... {remaining_lines} more lines omitted ..."
+        padding = " " * max(0, inner_width - _disp_width(msg))
+        line = f"\033[90m│\033[0m {msg}{padding} \033[90m│\033[0m"
+        result.append(line)
+    
+    bottom_border = "\033[90m╰" + "─" * (box_width - 2) + "╯\033[0m"
+    result.append(bottom_border)
+    
+    return '\n'.join(result)
 
 def convert_tools_to_anthropic(openai_tools: list) -> list:
     anthropic_tools = []
@@ -478,10 +724,41 @@ def format_tool_result(tool_name: str, success: bool, result: str, arguments: di
             return f"[OK] created {lines} lines"
         return f"[OK] created with content"
     elif tool_name == "edit_file":
-        if arguments and 'replacements' in arguments:
-            total_lines = sum(r['range'][1] - r['range'][0] + 1 for r in arguments['replacements'])
-            return f"[OK] edited {total_lines} lines"
-        return f"[OK] edited successfully"
+        # CLI 不展示 diff：仅输出简要统计，TUI 会读取 raw result 自行渲染
+        try:
+            result_data = json.loads(result)
+            diff_text = result_data.get("diff", "")
+            if not diff_text:
+                # 没有变更
+                return "[OK] no changes made"
+
+            # 尝试从 diff 估算增删行数
+            lines = diff_text.split('\n')
+            added = deleted = 0
+            started = False
+            for ln in lines:
+                if ln.startswith('@@'):
+                    started = True
+                    continue
+                if not started:
+                    continue
+                if ln.startswith('+') and not ln.startswith('+++'):
+                    added += 1
+                elif ln.startswith('-') and not ln.startswith('---'):
+                    deleted += 1
+            if added or deleted:
+                return f"[OK] edited (+{added} / -{deleted}) lines"
+
+            # 回退到基于参数的统计
+            if arguments and 'replacements' in arguments:
+                total_lines = sum(r['range'][1] - r['range'][0] + 1 for r in arguments['replacements'])
+                return f"[OK] edited {total_lines} lines"
+            return "[OK] edited successfully"
+        except (json.JSONDecodeError, KeyError, TypeError):
+            if arguments and 'replacements' in arguments:
+                total_lines = sum(r['range'][1] - r['range'][0] + 1 for r in arguments['replacements'])
+                return f"[OK] edited {total_lines} lines"
+            return "[OK] edited successfully"
     elif tool_name == "search_context":
         if "No matches found" in result:
             return "[OK] 0 results"

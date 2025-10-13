@@ -17,9 +17,117 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from rich.markdown import Markdown
 from rich.text import Text
+from rich.panel import Panel
+from rich.console import Group
+import re
 from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, set_session_id, set_work_dir, restore_plan
 from .config import load_config, get_provider_config
 from .core import load_session, save_session, get_session_dir, filter_tools_schema, build_tools_description, load_agents_md, format_tool_result, call_llm_api
+
+
+# TUI-only renderer: unified diff -> Rich Panel
+def render_diff_rich(diff_text: str, max_lines: int = 200) -> Panel:
+    lines = diff_text.split('\n') if diff_text else []
+    # Find first hunk header
+    start_idx = 0
+    for i, ln in enumerate(lines):
+        if ln.startswith('@@'):
+            start_idx = i
+            break
+    content = lines[start_idx:] if lines else []
+    if not content:
+        return Panel(Text("(no changes)", style="dim"), border_style="#888888")
+
+    def classify(ln: str):
+        if ln.startswith('@@'):
+            return 'hunk', ln
+        if not ln:
+            return 'ctx', ''
+        c = ln[0]
+        if c in ('+', '-', ' '):
+            return {'+': 'add', '-': 'del', ' ': 'ctx'}[c], ln[1:]
+        return 'ctx', ln
+
+    # First pass: number width
+    num_width = 1
+    ln_old = None
+    ln_new = None
+    for raw in content:
+        kind, text = classify(raw)
+        if kind == 'hunk':
+            m = re.search(r'@@ -(\d+),?\d* \+(\d+),?\d* @@', raw)
+            if m:
+                ln_old = int(m.group(1))
+                ln_new = int(m.group(2))
+                num_width = max(num_width, len(str(ln_old)), len(str(ln_new)))
+        elif kind == 'add':
+            if ln_new is not None:
+                num_width = max(num_width, len(str(ln_new)))
+                ln_new += 1
+        elif kind == 'del':
+            if ln_old is not None:
+                num_width = max(num_width, len(str(ln_old)))
+                ln_old += 1
+        else:
+            if ln_old is not None:
+                num_width = max(num_width, len(str(ln_old)))
+                ln_old += 1
+            if ln_new is not None:
+                ln_new += 1
+
+    # Second pass: single Text builder to avoid gaps
+    body = Text()
+    ln_old = None
+    ln_new = None
+    shown = 0
+    total = len(content)
+    for raw in content:
+        if shown >= max_lines:
+            body.append(f"... {total - shown} more lines omitted ...", style="dim")
+            body.append("\n")
+            break
+        kind, text = classify(raw)
+        if kind == 'hunk':
+            m = re.search(r'@@ -(\d+),?\d* \+(\d+),?\d* @@', raw)
+            if m:
+                ln_old = int(m.group(1))
+                ln_new = int(m.group(2))
+            body.append(raw, style="cyan")
+            body.append("\n")
+            shown += 1
+            continue
+        if kind == 'add':
+            old_s = ' ' * num_width
+            new_s = f"{ln_new:>{num_width}}" if ln_new is not None else ' ' * num_width
+            prefix = f" {old_s} │ {new_s} + "
+            body.append(prefix)
+            body.append(text if text else ' ', style="black on green")
+            body.append("\n")
+            if ln_new is not None:
+                ln_new += 1
+        elif kind == 'del':
+            old_s = f"{ln_old:>{num_width}}" if ln_old is not None else ' ' * num_width
+            new_s = ' ' * num_width
+            prefix = f" {old_s} │ {new_s} - "
+            body.append(prefix)
+            body.append(text if text else ' ', style="white on dark_red")
+            body.append("\n")
+            if ln_old is not None:
+                ln_old += 1
+        else:
+            old_s = f"{ln_old:>{num_width}}" if ln_old is not None else ' ' * num_width
+            new_s = f"{ln_new:>{num_width}}" if ln_new is not None else ' ' * num_width
+            prefix = f" {old_s} │ {new_s}   "
+            body.append(prefix)
+            body.append(text)
+            body.append("\n")
+            if ln_old is not None:
+                ln_old += 1
+            if ln_new is not None:
+                ln_new += 1
+        shown += 1
+
+    return Panel(body, border_style="#888888")
 
 
 def get_available_sessions() -> list:
@@ -769,6 +877,8 @@ class TricodeApp(App):
                     output.write(f"Session ID: {self.session_id}")
                     output.write("")
                     
+                    pending_tool_calls = {}
+                    pending_assistant_content = None
                     for msg in self.session.messages:
                         role = msg.get("role")
                         content = msg.get("content")
@@ -781,6 +891,7 @@ class TricodeApp(App):
                         elif role == "assistant":
                             tool_calls = msg.get("tool_calls")
                             if tool_calls:
+                                pending_tool_calls = {}
                                 for tc in tool_calls:
                                     func_name = tc.get("function", {}).get("name", "unknown")
                                     try:
@@ -789,15 +900,49 @@ class TricodeApp(App):
                                         func_args = {}
                                     formatted_call = format_tool_call(func_name, func_args)
                                     output.write(f"[#2b2420 on #ffb347] {formatted_call} [/]")
-                            if content:
+                                    if tc.get("id"):
+                                        pending_tool_calls[tc.get("id")] = (func_name, func_args)
+                                # Defer assistant content until after related tool outputs
+                                pending_assistant_content = content or None
+                            else:
+                                if content:
+                                    output.write("[bold #ff8c00]Agent:[/bold #ff8c00]")
+                                    md = Markdown(content)
+                                    output.write(md)
+                                    output.write("")
+                        elif role == "tool":
+                            call_id = msg.get("tool_call_id")
+                            func_info = pending_tool_calls.get(call_id)
+                            func_name, func_args = (func_info if isinstance(func_info, tuple) else (func_info, {})) if func_info else (None, {})
+                            if func_name == "edit_file":
+                                try:
+                                    data = json.loads(content)
+                                    diff_text = data.get("diff", "")
+                                except Exception:
+                                    diff_text = ""
+                                if diff_text:
+                                    output.write(render_diff_rich(diff_text))
+                                else:
+                                    formatted = format_tool_result("edit_file", True, content, func_args)
+                                    output.write(f"[#fdf5e6]↳ {formatted}[/#fdf5e6]")
+                            else:
+                                if func_name == "plan":
+                                    formatted = format_tool_result("plan", True, content, func_args)
+                                    output.write(Text.from_ansi(formatted))
+                                else:
+                                    formatted = format_tool_result(func_name or "unknown", True, content, func_args)
+                                    output.write(f"[#fdf5e6]↳ {formatted}[/#fdf5e6]")
+                            output.write("")
+                            # After consuming this tool output, remove it
+                            if call_id in pending_tool_calls:
+                                pending_tool_calls.pop(call_id, None)
+                            # If all pending tools done, flush deferred assistant content
+                            if not pending_tool_calls and pending_assistant_content:
                                 output.write("[bold #ff8c00]Agent:[/bold #ff8c00]")
-                                md = Markdown(content)
+                                md = Markdown(pending_assistant_content)
                                 output.write(md)
                                 output.write("")
-                        elif role == "tool":
-                            tool_content = content[:200] + "..." if len(content) > 200 else content
-                            output.write(f"[#fdf5e6]↳ {tool_content}[/#fdf5e6]")
-                            output.write("")
+                                pending_assistant_content = None
                     
                     output.write(f"[dim]--- Rolled back, {len(self.session.messages)} messages remaining ---[/dim]")
                     output.write("")
@@ -856,6 +1001,26 @@ class TricodeApp(App):
                         self.call_from_thread(lambda e=event: write_plan_result(e['formatted']))
                     else:
                         self.call_from_thread(lambda e=event: output.write(f"[red]{e['formatted']}[/red]"))
+                elif event.get("name") == "edit_file":
+                    def write_edit_result(raw_result: str, formatted: str, success: bool):
+                        if not success:
+                            output.write(f"[red]↳ {formatted}[/red]")
+                            return
+                        # Try to parse result JSON to get raw diff
+                        try:
+                            data = json.loads(raw_result)
+                            diff_text = data.get("diff", "")
+                        except Exception:
+                            diff_text = ""
+                        if diff_text:
+                            output.write(render_diff_rich(diff_text))
+                        else:
+                            # Fallback to ANSI parsing if diff missing
+                            edit_text = Text.from_ansi(formatted)
+                            output.write("↳ ")
+                            output.write(edit_text)
+
+                    self.call_from_thread(lambda e=event: write_edit_result(e['result'], e['formatted'], e['success']))
                 else:
                     if event["success"]:
                         self.call_from_thread(lambda e=event: output.write(f"[#fdf5e6]↳ {e['formatted']}[/#fdf5e6]"))
@@ -971,6 +1136,8 @@ class TricodeApp(App):
                     output.write(f"[dim]Press Enter to send, backslash+Enter for newline[/dim]")
                     output.write("")
                     
+                    pending_tool_calls = {}
+                    pending_assistant_content = None
                     for msg in messages:
                         role = msg.get("role")
                         content = msg.get("content")
@@ -983,6 +1150,7 @@ class TricodeApp(App):
                         elif role == "assistant":
                             tool_calls = msg.get("tool_calls")
                             if tool_calls:
+                                pending_tool_calls = {}
                                 for tc in tool_calls:
                                     func_name = tc.get("function", {}).get("name", "unknown")
                                     try:
@@ -991,15 +1159,46 @@ class TricodeApp(App):
                                         func_args = {}
                                     formatted_call = format_tool_call(func_name, func_args)
                                     output.write(f"[#2b2420 on #ffb347] {formatted_call} [/]")
-                            if content:
+                                    if tc.get("id"):
+                                        pending_tool_calls[tc.get("id")] = (func_name, func_args)
+                                pending_assistant_content = content or None
+                            else:
+                                if content:
+                                    output.write("[bold #ff8c00]Agent:[/bold #ff8c00]")
+                                    md = Markdown(content)
+                                    output.write(md)
+                                    output.write("")
+                        elif role == "tool":
+                            call_id = msg.get("tool_call_id")
+                            func_info = pending_tool_calls.get(call_id)
+                            func_name, func_args = (func_info if isinstance(func_info, tuple) else (func_info, {})) if func_info else (None, {})
+                            if func_name == "edit_file":
+                                try:
+                                    data = json.loads(content)
+                                    diff_text = data.get("diff", "")
+                                except Exception:
+                                    diff_text = ""
+                                if diff_text:
+                                    output.write(render_diff_rich(diff_text))
+                                else:
+                                    formatted = format_tool_result("edit_file", True, content, func_args)
+                                    output.write(f"[#fdf5e6]↳ {formatted}[/#fdf5e6]")
+                            else:
+                                if func_name == "plan":
+                                    formatted = format_tool_result("plan", True, content, func_args)
+                                    output.write(Text.from_ansi(formatted))
+                                else:
+                                    formatted = format_tool_result(func_name or "unknown", True, content, func_args)
+                                    output.write(f"[#fdf5e6]↳ {formatted}[/#fdf5e6]")
+                            output.write("")
+                            if call_id in pending_tool_calls:
+                                pending_tool_calls.pop(call_id, None)
+                            if not pending_tool_calls and pending_assistant_content:
                                 output.write("[bold #ff8c00]Agent:[/bold #ff8c00]")
-                                md = Markdown(content)
+                                md = Markdown(pending_assistant_content)
                                 output.write(md)
                                 output.write("")
-                        elif role == "tool":
-                            tool_content = content[:200] + "..." if len(content) > 200 else content
-                            output.write(f"[#fdf5e6]↳ {tool_content}[/#fdf5e6]")
-                            output.write("")
+                                pending_assistant_content = None
                     
                     output.write(f"[dim]--- History loaded ---[/dim]")
                     output.write("")

@@ -707,6 +707,10 @@ class AgentSession:
                 "content": collected_content,
                 "tool_calls": collected_tool_calls
             })
+            # Show assistant content first to match "content-first" preference
+            # before displaying tool calls/results.
+            if collected_content:
+                yield {"type": "assistant_message", "content": collected_content}
             
             tool_calls_tokens = 0
             for tc in collected_tool_calls:
@@ -765,7 +769,8 @@ class AgentSession:
                 "output_tokens": self.output_tokens,
                 "total_tokens": self.total_tokens
             }
-            
+            # Content already shown before tools when present.
+
             save_session(self.session_id, self.messages)
 
 
@@ -1120,6 +1125,9 @@ class TricodeCLI(App):
             if role == "assistant":
                 tool_calls = msg.get("tool_calls")
                 if tool_calls:
+                    # Content-first: render assistant content immediately
+                    if content:
+                        self._append_agent_message(content)
                     pending_tool_calls = {}
                     for tc in tool_calls:
                         func_name = tc.get("function", {}).get("name", "unknown")
@@ -1131,7 +1139,7 @@ class TricodeCLI(App):
                         self._append_tool_call(formatted_call)
                         if tc.get("id"):
                             pending_tool_calls[tc.get("id")] = (func_name, func_args)
-                    pending_assistant_content = content or None
+                    pending_assistant_content = None
                 else:
                     if content:
                         self._append_agent_message(content)

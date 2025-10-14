@@ -79,13 +79,13 @@ jobs:
       # ==== Windows ====
       - name: Build on Windows
         if: startsWith(matrix.os, 'windows')
+        shell: cmd
         run: |
           pip install -r requirements.txt
           pip install pyinstaller
-          chmod +x build.sh
-          ./build.sh auto
+          build.bat auto
           mkdir release
-          cp dist/tricode.exe release/tricode-${{ matrix.asset_suffix }}.exe
+          copy dist\tricode.exe release\tricode-${{ matrix.asset_suffix }}.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

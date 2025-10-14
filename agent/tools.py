@@ -29,8 +29,17 @@ LAST_PLAN_UPDATE_AT = 0
 
 WORK_DIR = None
 BYPASS_WORK_DIR_LIMIT = False
+BYPASS_PERMISSION = False
+SESSION_APPROVED_TOOLS = set()
+PERMISSION_CALLBACK = None
 LAST_WEB_SEARCH_TIME = 0
 WEB_SEARCH_RATE_LIMIT = 1.5
+
+DESTRUCTIVE_TOOLS = {
+    "create_file", "edit_file", "run_command",
+    "start_session", "send_input", "close_session",
+    "delete_file", "delete_path", "mkdir"
+}
 
 def get_plan_dir() -> Path:
     plan_dir = Path.home() / ".tricode" / "plans"
@@ -44,6 +53,17 @@ def set_work_dir(work_dir: str = None, bypass: bool = False) -> None:
         WORK_DIR = os.path.realpath(work_dir)
     else:
         WORK_DIR = os.path.realpath(os.getcwd())
+
+def set_bypass_permission(bypass: bool = False) -> None:
+    global BYPASS_PERMISSION
+    BYPASS_PERMISSION = bypass
+
+def reset_session_permissions() -> None:
+    global SESSION_APPROVED_TOOLS
+    SESSION_APPROVED_TOOLS = set()
+def set_permission_callback(callback) -> None:
+    global PERMISSION_CALLBACK
+    PERMISSION_CALLBACK = callback
 
 def resolve_path(path: str) -> str:
     expanded = os.path.expanduser(path)
@@ -63,6 +83,50 @@ def validate_path(path: str) -> Tuple[bool, str]:
         return True, ""
     except Exception as e:
         return False, f"Path validation error: {str(e)}"
+def ask_user_permission(tool_name: str, arguments: dict) -> Tuple[bool, bool, str]:
+    if BYPASS_PERMISSION:
+        return True, False, ""
+    
+    if tool_name in SESSION_APPROVED_TOOLS:
+        return True, False, ""    
+    if PERMISSION_CALLBACK is not None:
+        allowed, add_to_session, error_msg = PERMISSION_CALLBACK(tool_name, arguments)
+        if allowed and add_to_session:
+            SESSION_APPROVED_TOOLS.add(tool_name)
+        return allowed, not allowed, error_msg
+    
+    print("\n" + "="*60, flush=True)
+    print(f"⚠️  DESTRUCTIVE OPERATION REQUESTED", flush=True)
+    print("="*60, flush=True)
+    print(f"Tool: {tool_name}", flush=True)
+    print(f"Arguments:", flush=True)
+    for key, value in arguments.items():
+        value_str = str(value)
+        if len(value_str) > 200:
+            value_str = value_str[:200] + "..."
+        print(f"  {key}: {value_str}", flush=True)
+    print("="*60, flush=True)
+    print("Options:", flush=True)
+    print("  1 - Allow this operation (once)", flush=True)
+    print("  2 - Allow all future operations of this type in this session", flush=True)
+    print("  3 - Deny and terminate agent", flush=True)
+    print("="*60, flush=True)
+    
+    while True:
+        try:
+            choice = input("Your choice [1/2/3]: ").strip()
+            if choice == '1':
+                return True, False, ""
+            elif choice == '2':
+                SESSION_APPROVED_TOOLS.add(tool_name)
+                return True, False, ""
+            elif choice == '3':
+                return False, True, f"User denied {tool_name} operation and requested termination"
+            else:
+                print("Invalid choice. Please enter 1, 2, or 3.", flush=True)
+        except (EOFError, KeyboardInterrupt):
+            print("\nOperation cancelled by user.", flush=True)
+            return False, True, f"User cancelled {tool_name} operation"
 
 def save_plan_state(session_id: str, plan_data: dict) -> None:
     if not session_id:
@@ -88,11 +152,12 @@ def load_plan_state(session_id: str) -> Optional[dict]:
         return None
 
 def set_session_id(session_id: str) -> None:
-    global CURRENT_SESSION_ID, PLAN_DECISION_MADE, SIGNIFICANT_ACTIONS_COUNT, LAST_PLAN_UPDATE_AT
+    global CURRENT_SESSION_ID, PLAN_DECISION_MADE, SIGNIFICANT_ACTIONS_COUNT, LAST_PLAN_UPDATE_AT, SESSION_APPROVED_TOOLS
     CURRENT_SESSION_ID = session_id
     PLAN_DECISION_MADE = False
     SIGNIFICANT_ACTIONS_COUNT = 0
     LAST_PLAN_UPDATE_AT = 0
+    SESSION_APPROVED_TOOLS = set()
 
 def restore_plan(session_id: str) -> None:
     global CURRENT_PLAN, PLAN_DECISION_MADE, SIGNIFICANT_ACTIONS_COUNT
@@ -1626,6 +1691,15 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
             "Call plan(action='create', tasks=[...]) for multi-step tasks, "
             "or plan(action='skip', reason='...') for simple tasks."
         )
+    
+    if name in DESTRUCTIVE_TOOLS:
+        allowed, should_terminate, error_msg = ask_user_permission(name, arguments)
+        if not allowed:
+            if should_terminate:
+                import sys
+                print(f"\n\u274c Agent terminated: {error_msg}", flush=True)
+                sys.exit(1)
+            return False, error_msg
     
     significant_action_tools = ["read_file", "edit_file", "create_file", "delete_file", "delete_path", "mkdir", "run_command"]
     if name in significant_action_tools and CURRENT_PLAN is not None:

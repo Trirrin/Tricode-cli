@@ -3,10 +3,9 @@ import json
 import asyncio
 from pathlib import Path
 from datetime import datetime
-from typing import Iterator
+from typing import Iterator, Tuple, Union
 from openai import OpenAI
 from anthropic import Anthropic
-from typing import Union
 import tiktoken
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, TextArea, RichLog, Static, ListView, ListItem, Label
@@ -193,6 +192,106 @@ def get_available_sessions() -> list:
     
     return sessions
 
+
+class PermissionDialog(ModalScreen):
+    CSS = """
+    PermissionDialog {
+        align: center middle;
+    }
+    
+    #permission_dialog {
+        width: 80;
+        height: auto;
+        border: solid #ff0000;
+        background: #3a3228;
+    }
+    
+    #permission_title {
+        width: 100%;
+        height: 1;
+        background: #ff0000;
+        color: #ffffff;
+        content-align: center middle;
+    }
+    
+    #permission_content {
+        width: 100%;
+        height: auto;
+        padding: 1;
+        background: #3a3228;
+        color: #fdf5e6;
+    }
+    
+    #permission_options {
+        width: 100%;
+        height: auto;
+        background: #3a3228;
+    }
+    
+    ListView {
+        height: auto;
+        background: #3a3228;
+    }
+    
+    ListItem {
+        background: #3a3228;
+        color: #fdf5e6;
+    }
+    
+    ListItem.--highlight {
+        background: #ff8c00;
+        color: #2b2420;
+    }
+    """
+    
+    BINDINGS = [
+        ("escape", "deny", "Deny"),
+        ("enter", "confirm", "Confirm"),
+    ]
+    
+    def __init__(self, tool_name: str, arguments: dict):
+        super().__init__()
+        self.tool_name = tool_name
+        self.arguments = arguments
+    
+    def compose(self) -> ComposeResult:
+        with Container(id="permission_dialog"):
+            yield Label("⚠️  DESTRUCTIVE OPERATION REQUESTED", id="permission_title")
+            
+            content_lines = [
+                f"Tool: {self.tool_name}",
+                "Arguments:"
+            ]
+            for key, value in self.arguments.items():
+                value_str = str(value)
+                if len(value_str) > 100:
+                    value_str = value_str[:100] + "..."
+                content_lines.append(f"  {key}: {value_str}")
+            
+            yield Static("\n".join(content_lines), id="permission_content")
+            
+            with Container(id="permission_options"):
+                with ListView():
+                    yield ListItem(Label("Allow this operation (once)"))
+                    yield ListItem(Label("Allow all future operations of this type in this session"))
+                    yield ListItem(Label("Deny and terminate agent"))
+    
+    def action_confirm(self) -> None:
+        list_view = self.query_one(ListView)
+        selected_index = list_view.index
+        
+        if selected_index == 0:
+            self.dismiss((True, False, ""))
+        elif selected_index == 1:
+            self.dismiss((True, True, ""))
+        elif selected_index == 2:
+            self.dismiss((False, True, f"User denied {self.tool_name} operation and requested termination"))
+    
+    def action_deny(self) -> None:
+        self.dismiss((False, True, f"User denied {self.tool_name} operation and requested termination"))
+    
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        self.action_confirm()
 
 class SessionListScreen(ModalScreen):
     CSS = """
@@ -669,12 +768,13 @@ class TricodeCLI(App):
         Binding("ctrl+l", "clear_output", "Clear"),
     ]
     
-    def __init__(self, config: dict, work_dir: str = None, bypass_work_dir_limit: bool = False, 
+    def __init__(self, config: dict, work_dir: str = None, bypass_work_dir_limit: bool = False, bypass_permission: bool = False,
                  allowed_tools: list = None, override_system_prompt: bool = False, resume_session_id: str = None, debug: bool = False, provider_name: str = None):
         super().__init__()
         self.config = config
         self.work_dir = work_dir
         self.bypass_work_dir_limit = bypass_work_dir_limit
+        self.bypass_permission = bypass_permission
         self.allowed_tools = allowed_tools
         self.override_system_prompt = override_system_prompt
         self.debug_mode = debug
@@ -686,6 +786,10 @@ class TricodeCLI(App):
         self.animation_timer = None
         
         set_work_dir(work_dir, bypass_work_dir_limit)
+        
+        from . import tools as tools_module
+        tools_module.set_bypass_permission(bypass_permission)
+        tools_module.set_permission_callback(self._ask_permission_async)
         
         try:
             provider_config = get_provider_config(provider_name)
@@ -766,7 +870,24 @@ class TricodeCLI(App):
         output.write(f"Session ID: {self.session_id}")
         output.write(f"[dim]Press Enter to send, backslash+Enter for newline[/dim]")
         output.write("")
-        self.query_one("#input", CustomTextArea).focus()
+        self.query_one("#input", CustomTextArea).focus()    
+    def _ask_permission_async(self, tool_name: str, arguments: dict) -> Tuple[bool, bool, str]:
+        import threading
+        result_holder = {'result': None}
+        event = threading.Event()
+        
+        def push_screen_callback(dialog_result):
+            result_holder['result'] = dialog_result
+            event.set()
+        
+        self.call_from_thread(self.push_screen, PermissionDialog(tool_name, arguments), push_screen_callback)
+        
+        event.wait(timeout=300)
+        
+        if result_holder['result'] is None:
+            return False, True, "Permission request timed out"
+        
+        return result_holder['result']
     
     def _update_loading_animation(self) -> None:
         if not self.agent_running:
@@ -1192,7 +1313,7 @@ class TricodeCLI(App):
         output.write("")
 
 
-def run_tui(work_dir: str = None, bypass_work_dir_limit: bool = False, allowed_tools: list = None, 
+def run_tui(work_dir: str = None, bypass_work_dir_limit: bool = False, bypass_permission: bool = False, allowed_tools: list = None, 
             override_system_prompt: bool = False, resume_session_id: str = None, debug: bool = False, provider_name: str = None):
     config = load_config()
     
@@ -1200,6 +1321,7 @@ def run_tui(work_dir: str = None, bypass_work_dir_limit: bool = False, allowed_t
         config=config,
         work_dir=work_dir,
         bypass_work_dir_limit=bypass_work_dir_limit,
+        bypass_permission=bypass_permission,
         allowed_tools=allowed_tools,
         override_system_prompt=override_system_prompt,
         resume_session_id=resume_session_id,

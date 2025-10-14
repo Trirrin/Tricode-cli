@@ -1029,8 +1029,9 @@ def build_system_prompt(allowed_tools: list = None, override_system_prompt: bool
     
     return system_prompt
 
-def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, override_system_prompt: bool = False, resume_session_id: str = None, allowed_tools: list = None, work_dir: str = None, bypass_work_dir_limit: bool = False, debug: bool = False, provider_name: str = None) -> str:
+def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, override_system_prompt: bool = False, resume_session_id: str = None, allowed_tools: list = None, work_dir: str = None, bypass_work_dir_limit: bool = False, bypass_permission: bool = False, debug: bool = False, provider_name: str = None) -> str:
     set_work_dir(work_dir, bypass_work_dir_limit)
+    tools_module.set_bypass_permission(bypass_permission)
     
     try:
         provider_config = get_provider_config(provider_name)

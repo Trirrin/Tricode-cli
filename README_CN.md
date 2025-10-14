@@ -153,6 +153,43 @@ export TRICODE_OPENAI_MODEL="gpt-4o"
 - `--bypass-work-directory-limit`：允许访问工作目录外的文件
   - 谨慎使用 - 移除所有路径限制
   - 适用于系统级操作
+#### 权限控制（安全特性）
+
+**默认行为：安全模式**
+
+所有破坏性操作（创建、编辑、删除文件，执行命令等）默认需要用户明确授权。
+
+- `--bypass-permission`：跳过破坏性操作的用户确认（谨慎使用）
+  - ⚠️ **警告**：仅在完全信任 AI 的行为时使用
+  - 适用场景：测试、调试、沙盒环境
+  - 即使使用此选项，工作目录限制仍然生效（除非也使用 `--bypass-work-directory-limit`）
+
+**用户授权选项**：
+
+当破坏性操作被请求时，您将看到：
+```
+============================================================
+⚠️  DESTRUCTIVE OPERATION REQUESTED
+============================================================
+Tool: create_file
+Arguments:
+  path: example.txt
+  content: Hello World
+============================================================
+Options:
+  1 - Allow this operation (once)           # 仅允许此次操作
+  2 - Allow all future operations of this   # 本会话内允许该类型的所有操作
+      type in this session
+  3 - Deny and terminate agent              # 拒绝并终止 Agent
+============================================================
+Your choice [1/2/3]:
+```
+
+**最佳实践**：
+- 默认使用安全模式，审查每个操作
+- 使用选项 2 仅在您信任 Agent 的计划后
+- 如发现可疑行为，毫不犹豫选择选项 3
+- 结合 `--work-dir` 限制范围，即使在 bypass 模式下
 
 **使用示例**：
 ```bash

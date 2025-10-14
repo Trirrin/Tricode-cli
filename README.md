@@ -153,6 +153,45 @@ Features:
 - `--bypass-work-directory-limit`: Allow access to files outside the working directory
   - Use with caution - removes all path restrictions
   - Useful for system-wide operations
+#### Permission Control (Security Feature)
+
+**Default Behavior: Safe Mode**
+
+All destructive operations (create, edit, delete files, run commands, etc.) require explicit user approval by default.
+
+- `--bypass-permission`: Skip user confirmation for destructive operations (use with caution)
+  - ⚠️ **WARNING**: Use only when you fully trust the AI's behavior
+  - Use cases: testing, debugging, sandboxed environments
+  - Even with this flag, work directory restrictions still apply (unless also using `--bypass-work-directory-limit`)
+
+**User Authorization Options**:
+
+When a destructive operation is requested, you will see:
+```
+============================================================
+⚠️  DESTRUCTIVE OPERATION REQUESTED
+============================================================
+Tool: create_file
+Arguments:
+  path: example.txt
+  content: Hello World
+============================================================
+Options:
+  1 - Allow this operation (once)           # Single approval
+  2 - Allow all future operations of this   # Approve all in this session
+      type in this session
+  3 - Deny and terminate agent              # Reject and stop
+============================================================
+Your choice [1/2/3]:
+```
+
+**Best Practices**:
+- Default to safe mode, review each operation
+- Use option 2 only after you trust the agent's plan
+- Don't hesitate to choose option 3 if something looks suspicious
+- Combine with `--work-dir` to limit scope even in bypass mode
+
+**For more details, see [SECURITY.md](docs/SECURITY.md)**
 
 **Example usage**:
 ```bash

@@ -107,6 +107,11 @@ Examples:
         "--bypass-work-directory-limit",
         action="store_true",
         help="Allow access to files outside the working directory"
+    )    
+    parser.add_argument(
+        "--bypass-permission",
+        action="store_true",
+        help="Skip user confirmation for destructive operations (use with caution)"
     )
     
     parser.add_argument(
@@ -138,6 +143,7 @@ Examples:
         run_tui(
             work_dir=args.work_dir,
             bypass_work_dir_limit=args.bypass_work_directory_limit,
+            bypass_permission=args.bypass_permission,
             allowed_tools=allowed_tools,
             override_system_prompt=args.override_system_prompt,
             resume_session_id=args.resume,
@@ -164,6 +170,7 @@ Examples:
         allowed_tools=allowed_tools,
         work_dir=args.work_dir,
         bypass_work_dir_limit=args.bypass_work_directory_limit,
+        bypass_permission=args.bypass_permission,
         debug=args.debug,
         provider_name=args.provider
     )

@@ -180,7 +180,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read file content, optionally reading only specified line ranges",
+            "description": "Read file content, optionally reading only specified line ranges. Optionally include metadata for safe edit chaining.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -197,6 +197,11 @@ TOOLS_SCHEMA = [
                             "minItems": 2,
                             "maxItems": 2
                         }
+                    },
+                    "with_metadata": {
+                        "type": "boolean",
+                        "description": "If true, return JSON: {path, total_lines, mtime, sha256, content}",
+                        "default": False
                     }
                 },
                 "required": ["path"]
@@ -602,7 +607,7 @@ def delete_path(path: str, recursive: bool = False) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Delete failed: {str(e)}"
 
-def read_file(path: str, ranges: list = None) -> Tuple[bool, str]:
+def read_file(path: str, ranges: list = None, with_metadata: bool = False) -> Tuple[bool, str]:
     resolved_path = resolve_path(path)
     valid, err_msg = validate_path(resolved_path)
     if not valid:
@@ -616,11 +621,28 @@ def read_file(path: str, ranges: list = None) -> Tuple[bool, str]:
                 lines = f.readlines()
                 selected_lines = []
                 for start, end in ranges:
-                    if start < 1 or end > len(lines) or start > end:
+                    if start < 1 or start > len(lines):
+                        return False, f"Invalid range start: {start}, file has {len(lines)} lines"
+                    # allow end to exceed file length; clamp at EOF for practicality
+                    end_clamped = min(end, len(lines))
+                    if start > end_clamped:
                         return False, f"Invalid range: ({start}, {end}), file has {len(lines)} lines"
-                    selected_lines.extend(lines[start-1:end])
+                    selected_lines.extend(lines[start-1:end_clamped])
                 content = ''.join(selected_lines)
-        return True, content
+
+        if not with_metadata:
+            return True, content
+
+        # Build metadata for better edit chaining
+        stat_info = os.stat(resolved_path)
+        meta = {
+            "path": resolved_path,
+            "total_lines": content.count('\n') + (0 if content.endswith('\n') else (1 if content else 0)),
+            "mtime": datetime.fromtimestamp(stat_info.st_mtime).isoformat(),
+            "sha256": _compute_sha256(content),
+            "content": content
+        }
+        return True, json.dumps(meta)
     except FileNotFoundError:
         return False, f"File not found: {resolved_path}"
     except Exception as e:
@@ -787,8 +809,8 @@ def edit_file(path: str, hunks: list, precondition: dict = None, dry_run: bool =
             if not spans:
                 return False, f"Anchor not found for op={op}"
 
-            # choose occurrence
-            nth = h.get("nth")
+            # choose occurrence (nth belongs to anchor schema)
+            nth = anchor.get("nth")
             occ = anchor.get("occurrence", "first")
             if nth is not None:
                 idx = nth - 1
@@ -797,7 +819,8 @@ def edit_file(path: str, hunks: list, precondition: dict = None, dry_run: bool =
             else:
                 idx = 0
 
-            if must_unique and len(spans) != 1:
+            # Only enforce uniqueness when not explicitly disambiguated
+            if must_unique and nth is None and occ == "first" and len(spans) != 1:
                 return False, f"Anchor ambiguous: {len(spans)} matches"
 
             if idx < 0 or idx >= len(spans):
@@ -876,6 +899,8 @@ def edit_file(path: str, hunks: list, precondition: dict = None, dry_run: bool =
             "applied": True,
             "hunks_applied": applied,
             "matches": matches_meta,
+            "sha256_before": _compute_sha256(original_text),
+            "sha256_after": _compute_sha256(text),
             "diff": diff_text
         }
 
@@ -1493,7 +1518,8 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
     elif name == "read_file":
         return read_file(
             arguments.get("path"),
-            arguments.get("ranges")
+            arguments.get("ranges"),
+            arguments.get("with_metadata", False)
         )
     elif name == "create_file":
         return create_file(

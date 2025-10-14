@@ -969,6 +969,7 @@ def build_system_prompt(allowed_tools: list = None, override_system_prompt: bool
         principles.append("4. Search first: When uncertain about file names or locations, use search_context")
     if has_read and has_edit:
         principles.append(f"{len(principles) + 1}. Verify before acting: Read files before modifying them")
+        principles.append(f"{len(principles) + 1}. Use preconditions for edits: Read via read_file(with_metadata=true) to get sha256, then set edit_file.precondition.file_sha256 before modifying")
     principles.append(f"{len(principles) + 1}. Track progress: Update plan status after each task completion")
     
     tools_section += "Core principles:\n" + "\n".join(principles) + "\n\n"
@@ -980,6 +981,7 @@ def build_system_prompt(allowed_tools: list = None, override_system_prompt: bool
             examples.append("- Unclear request? Search to understand the codebase structure")
         if has_read and has_edit:
             examples.append("- Before editing? Read the file first to understand context")
+            examples.append("- Safe edit flow: read_file(with_metadata=true) -> use returned sha256 as edit_file.precondition.file_sha256 -> apply hunks (use occurrence=last or anchor.nth to disambiguate)")
         tools_section += "\n".join(examples) + "\n\n"
     
     tools_section += (

@@ -166,6 +166,9 @@ Features:
 ./tricode.py --work-dir /path/to/project --bypass-work-directory-limit "compare with /etc/config"
 ```
 
+Tips:
+- `read_file` supports `with_metadata=true` to return JSON with `{path, total_lines, mtime, sha256, content}` for safer chaining with `edit_file.precondition.file_sha256`.
+
 ## Examples
 
 Search for patterns:

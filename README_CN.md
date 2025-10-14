@@ -166,6 +166,9 @@ export TRICODE_OPENAI_MODEL="gpt-4o"
 ./tricode.py --work-dir /path/to/project --bypass-work-directory-limit "与 /etc/config 进行比较"
 ```
 
+提示：
+- `read_file` 支持 `with_metadata=true` 返回包含 `{path, total_lines, mtime, sha256, content}` 的 JSON，推荐与 `edit_file.precondition.file_sha256` 配合，避免并发导致的误编辑。
+
 ## 使用示例
 
 搜索指定模式：

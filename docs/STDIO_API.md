@@ -237,9 +237,20 @@ tricode --stdio "list files in current directory"
 
 **参数：**
 ```json
-{"path": "tricode.py", "ranges": [[1, 10]]}
+{"path": "tricode.py", "ranges": [[1, 10]], "with_metadata": false}
 ```
-- `ranges` 可选，指定读取的行范围（从 1 开始）
+- `ranges` 可选，指定读取的行范围（从 1 开始）。`end` 可超出文件长度，将被安全裁剪到 EOF。
+- `with_metadata` 可选，默认为 `false`。为 `true` 时返回 JSON 对象：
+  ```json
+  {
+    "path": "/abs/path/tricode.py",
+    "total_lines": 47,
+    "mtime": "2025-01-01T12:00:00",
+    "sha256": "...",
+    "content": "...file content..."
+  }
+  ```
+  推荐配合 `edit_file.precondition.file_sha256` 使用以避免竞争条件。
 
 ---
 
@@ -276,6 +287,10 @@ tricode --stdio "list files in current directory"
   "dry_run": false
 }
 ```
+
+说明：
+- `anchor.nth`（1-based）用于选择第 n 个匹配；当提供 `nth` 或使用 `occurrence: "last"` 时，不强制唯一匹配。
+- 结果 JSON 额外包含 `sha256_before` 与 `sha256_after` 字段，便于后续链式操作。
 
 ---
 

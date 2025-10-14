@@ -1135,21 +1135,37 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
         })
         
         tool_results = []
-        for tool_call in message.tool_calls:
+        deny_triggered = False
+        for idx, tool_call in enumerate(message.tool_calls):
             func_name = tool_call.function.name
             try:
                 func_args = json.loads(tool_call.function.arguments)
             except json.JSONDecodeError:
                 func_args = {}
-            
+
+            if deny_triggered:
+                denial_text = "Denied: previous operation denied by user"
+                formatted_result = format_tool_result(func_name, False, denial_text, func_args)
+                writer.write_tool_call(func_name, func_args, format_tool_call(func_name, func_args))
+                writer.write_tool_result(func_name, False, denial_text, formatted_result)
+                tool_results.append({
+                    "tool_call_id": tool_call.id,
+                    "content": denial_text
+                })
+                continue
+
             formatted_call = format_tool_call(func_name, func_args)
             writer.write_tool_call(func_name, func_args, formatted_call)
-            
+
             success, result = execute_tool(func_name, func_args)
-            
+
             formatted_result = format_tool_result(func_name, success, result, func_args)
             writer.write_tool_result(func_name, success, result, formatted_result)
-            
+
+            # Detect non-terminating denial and avoid further tool executions this round
+            if not success and isinstance(result, str) and result.startswith("Denied:"):
+                deny_triggered = True
+
             tool_results.append({
                 "tool_call_id": tool_call.id,
                 "content": result
@@ -1168,3 +1184,7 @@ def run_agent(user_input: str, verbose: bool = False, stdio_mode: bool = False, 
             })
         
         save_session(session_id, messages)
+        
+        # If denial happened, do not perform another API request this round
+        if deny_triggered:
+            return ""

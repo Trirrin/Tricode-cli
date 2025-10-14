@@ -24,6 +24,7 @@ from rich.console import Group
 from typing import Optional
 import re
 from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, set_session_id, set_work_dir, restore_plan
+from . import tools as tools_module
 from .config import load_config, get_provider_config
 from .core import load_session, save_session, get_session_dir, filter_tools_schema, build_tools_description, load_agents_md, format_tool_result, call_llm_api, build_system_prompt
 
@@ -332,12 +333,37 @@ class PermissionDialog(ModalScreen):
                 content_lines.append(f"  {key}: {value_str}")
             
             yield Static("\n".join(content_lines), id="permission_content")
+
+            # For edit_file, show a dry-run diff preview
+            if self.tool_name == "edit_file":
+                try:
+                    ok, res = tools_module.edit_file(
+                        path=self.arguments.get("path"),
+                        hunks=self.arguments.get("hunks"),
+                        precondition=self.arguments.get("precondition"),
+                        dry_run=True,
+                        mode=self.arguments.get("mode", "patch"),
+                        content=self.arguments.get("content")
+                    )
+                    diff_text = ""
+                    if ok:
+                        try:
+                            data = json.loads(res)
+                            diff_text = data.get("diff", "")
+                        except Exception:
+                            diff_text = ""
+                    if diff_text:
+                        yield Static(render_diff_rich(diff_text))
+                    else:
+                        yield Static(Text("(no diff preview)", style="dim"))
+                except Exception as e:
+                    yield Static(Text(f"(diff preview failed: {rich_escape(str(e))})", style="red"))
             
             with Container(id="permission_options"):
                 with ListView():
                     yield ListItem(Label("Allow this operation (once)"))
                     yield ListItem(Label("Allow all future operations of this type in this session"))
-                    yield ListItem(Label("Deny and terminate agent"))
+                    yield ListItem(Label("Deny and stop current request"))
     
     def action_confirm(self) -> None:
         list_view = self.query_one(ListView)
@@ -348,10 +374,12 @@ class PermissionDialog(ModalScreen):
         elif selected_index == 1:
             self.dismiss((True, True, ""))
         elif selected_index == 2:
-            self.dismiss((False, True, f"User denied {self.tool_name} operation and requested termination"))
+            # Deny and stop only this request (do not exit TUI)
+            self.dismiss((False, True, f"User denied {self.tool_name} operation and cancelled current request"))
     
     def action_deny(self) -> None:
-        self.dismiss((False, True, f"User denied {self.tool_name} operation and requested termination"))
+        # ESC acts like: deny and stop current request
+        self.dismiss((False, True, f"User denied {self.tool_name} operation and cancelled current request"))
     
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         self.action_confirm()
@@ -731,25 +759,73 @@ class AgentSession:
             }
             
             tool_results = []
-            for tool_call in collected_tool_calls:
-                if cancel_check and cancel_check():
-                    return
-                
-                func_name = tool_call["function"]["name"]
-                try:
-                    func_args = json.loads(tool_call["function"]["arguments"])
-                except json.JSONDecodeError:
-                    func_args = {}
-                
-                formatted_call = format_tool_call(func_name, func_args)
-                yield {"type": "tool_call", "name": func_name, "args": func_args, "formatted": formatted_call}
-                
-                success, result = execute_tool(func_name, func_args)
-                
-                formatted_result = format_tool_result(func_name, success, result, func_args)
-                yield {"type": "tool_result", "name": func_name, "success": success, "result": result, "formatted": formatted_result}
-                
-                tool_results.append({"tool_call_id": tool_call["id"], "content": result})
+            try:
+                for idx, tool_call in enumerate(collected_tool_calls):
+                    if cancel_check and cancel_check():
+                        return
+
+                    func_name = tool_call["function"]["name"]
+                    try:
+                        func_args = json.loads(tool_call["function"]["arguments"])
+                    except json.JSONDecodeError:
+                        func_args = {}
+
+                    formatted_call = format_tool_call(func_name, func_args)
+                    yield {"type": "tool_call", "name": func_name, "args": func_args, "formatted": formatted_call}
+
+                    success, result = execute_tool(func_name, func_args)
+
+                    formatted_result = format_tool_result(func_name, success, result, func_args)
+                    yield {"type": "tool_result", "name": func_name, "success": success, "result": result, "formatted": formatted_result}
+
+                    tool_results.append({"tool_call_id": tool_call["id"], "content": result})
+            except tools_module.PermissionDeniedTerminate as e:
+                # User denied a destructive action: we must still emit tool_results
+                # for ALL tool_use blocks in this assistant message to keep the
+                # conversation valid for Anthropic. Fill remaining with a denial message.
+                denial_text = str(e) or "Operation denied by user"
+                # Include current and remaining tool calls that didn't get results
+                # Determine how many results have already been added; complete the rest
+                already = {tr["tool_call_id"] for tr in tool_results}
+                for tc in collected_tool_calls:
+                    if tc["id"] in already:
+                        continue
+                    denial_result = f"Denied: {denial_text}"
+                    # Also surface in UI
+                    try:
+                        fn = tc.get("function", {}).get("name", "")
+                        fa = tc.get("function", {}).get("arguments", "{}")
+                        try:
+                            fa_parsed = json.loads(fa)
+                        except Exception:
+                            fa_parsed = {}
+                        formatted = format_tool_result(fn or "unknown", False, denial_result, fa_parsed)
+                        yield {"type": "tool_result", "name": fn or "unknown", "success": False, "result": denial_result, "formatted": formatted, "args": fa_parsed}
+                    except Exception:
+                        pass
+                    tool_results.append({"tool_call_id": tc["id"], "content": denial_result})
+                # After producing tool results for all tool_use, append them and stop this round
+                tool_messages_tokens = 0
+                for tool_result in tool_results:
+                    self.messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_result["tool_call_id"],
+                        "content": tool_result["content"]
+                    })
+                    tool_messages_tokens += len(self.encoding.encode(str(tool_result["content"])))
+                    tool_messages_tokens += 4
+                self.input_tokens += tool_messages_tokens
+                self.total_tokens = self.input_tokens + self.output_tokens
+                yield {
+                    "type": "token_update",
+                    "input_tokens": self.input_tokens,
+                    "output_tokens": self.output_tokens,
+                    "total_tokens": self.total_tokens
+                }
+                save_session(self.session_id, self.messages)
+                # Notify UI and stop processing further
+                yield {"type": "denied_request", "content": denial_text}
+                return
             
             tool_messages_tokens = 0
             for tool_result in tool_results:
@@ -892,10 +968,10 @@ class TricodeCLI(App):
         self.render_below = int(os.getenv("TRICODE_TUI_VIS_BELOW", "30"))
         
         set_work_dir(work_dir, bypass_work_dir_limit)
-        
-        from . import tools as tools_module
         tools_module.set_bypass_permission(bypass_permission)
         tools_module.set_permission_callback(self._ask_permission_async)
+        # In TUI mode, denial should not exit the whole process
+        tools_module.set_exit_on_terminate(False)
         
         try:
             provider_config = get_provider_config(provider_name)
@@ -1327,6 +1403,10 @@ class TricodeCLI(App):
             
             elif event["type"] == "cancelled":
                 self.call_from_thread(lambda: self._append_info_line("[bold yellow]Request cancelled by user[/bold yellow]"))
+            
+            elif event["type"] == "denied_request":
+                # Permission dialog denial: stop current request, keep TUI alive
+                self.call_from_thread(lambda e=event: self._append_info_line("[bold yellow]Operation denied. Current request cancelled.[/bold yellow] " + rich_escape(str(e['content']))))
         
         def process_in_thread():
             try:
@@ -1335,6 +1415,8 @@ class TricodeCLI(App):
                         display_event({"type": "cancelled"})
                         break
                     display_event(event)
+            except tools_module.PermissionDeniedTerminate as e:
+                display_event({"type": "denied_request", "content": str(e)})
             except Exception as e:
                 display_event({"type": "error", "content": str(e)})
         

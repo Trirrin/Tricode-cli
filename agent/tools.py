@@ -30,6 +30,7 @@ LAST_PLAN_UPDATE_AT = 0
 WORK_DIR = None
 BYPASS_WORK_DIR_LIMIT = False
 BYPASS_PERMISSION = False
+EXIT_ON_TERMINATE = True
 SESSION_APPROVED_TOOLS = set()
 PERMISSION_CALLBACK = None
 LAST_WEB_SEARCH_TIME = 0
@@ -57,6 +58,22 @@ def set_work_dir(work_dir: str = None, bypass: bool = False) -> None:
 def set_bypass_permission(bypass: bool = False) -> None:
     global BYPASS_PERMISSION
     BYPASS_PERMISSION = bypass
+
+def set_exit_on_terminate(exit_on_terminate: bool = True) -> None:
+    """Configure whether denial should terminate the whole process.
+
+    - CLI: keep default True to exit with code 1 on user-requested termination.
+    - TUI: set to False so we raise a controlled exception instead of exiting.
+    """
+    global EXIT_ON_TERMINATE
+    EXIT_ON_TERMINATE = bool(exit_on_terminate)
+
+class PermissionDeniedTerminate(Exception):
+    """Raised when the user denies a destructive operation and requests termination.
+
+    TUI catches this to stop the current agent run without exiting the app.
+    """
+    pass
 
 def reset_session_permissions() -> None:
     global SESSION_APPROVED_TOOLS
@@ -91,9 +108,13 @@ def ask_user_permission(tool_name: str, arguments: dict) -> Tuple[bool, bool, st
         return True, False, ""    
     if PERMISSION_CALLBACK is not None:
         allowed, add_to_session, error_msg = PERMISSION_CALLBACK(tool_name, arguments)
-        if allowed and add_to_session:
-            SESSION_APPROVED_TOOLS.add(tool_name)
-        return allowed, not allowed, error_msg
+        if allowed:
+            if add_to_session:
+                SESSION_APPROVED_TOOLS.add(tool_name)
+            return True, False, ""
+        # For denial via callback: overload add_to_session as a flag meaning
+        # whether to terminate the current request (True) or simply continue (False).
+        return False, bool(add_to_session), error_msg
     
     print("\n" + "="*60, flush=True)
     print(f"⚠️  DESTRUCTIVE OPERATION REQUESTED", flush=True)
@@ -105,25 +126,58 @@ def ask_user_permission(tool_name: str, arguments: dict) -> Tuple[bool, bool, st
         if len(value_str) > 200:
             value_str = value_str[:200] + "..."
         print(f"  {key}: {value_str}", flush=True)
+    # For edit_file, attempt to show a dry-run diff preview.
+    if tool_name == "edit_file":
+        try:
+            ok, res = edit_file(
+                path=arguments.get("path"),
+                hunks=arguments.get("hunks"),
+                precondition=arguments.get("precondition"),
+                dry_run=True,
+                mode=arguments.get("mode", "patch"),
+                content=arguments.get("content")
+            )
+            if ok:
+                try:
+                    data = json.loads(res)
+                    diff_preview = data.get("diff", "")
+                except Exception:
+                    diff_preview = ""
+                if diff_preview:
+                    print("\n--- Diff Preview (dry-run) ---", flush=True)
+                    # Print only first 200 lines to keep it readable
+                    lines = diff_preview.splitlines()
+                    head = lines[:200]
+                    for ln in head:
+                        print(ln, flush=True)
+                    if len(lines) > 200:
+                        print(f"... {len(lines) - 200} more lines omitted ...", flush=True)
+                    print("--- End Diff Preview ---\n", flush=True)
+        except Exception as e:
+            print(f"(Diff preview unavailable: {e})", flush=True)
     print("="*60, flush=True)
     print("Options:", flush=True)
     print("  1 - Allow this operation (once)", flush=True)
     print("  2 - Allow all future operations of this type in this session", flush=True)
-    print("  3 - Deny and terminate agent", flush=True)
+    print("  3 - Deny and continue (do not run this tool)", flush=True)
+    print("  4 - Deny and terminate agent", flush=True)
     print("="*60, flush=True)
     
     while True:
         try:
-            choice = input("Your choice [1/2/3]: ").strip()
+            choice = input("Your choice [1/2/3/4]: ").strip()
             if choice == '1':
                 return True, False, ""
             elif choice == '2':
                 SESSION_APPROVED_TOOLS.add(tool_name)
                 return True, False, ""
             elif choice == '3':
+                # Deny without terminating; caller returns a tool_result message
+                return False, False, f"User denied {tool_name} operation"
+            elif choice == '4':
                 return False, True, f"User denied {tool_name} operation and requested termination"
             else:
-                print("Invalid choice. Please enter 1, 2, or 3.", flush=True)
+                print("Invalid choice. Please enter 1, 2, 3, or 4.", flush=True)
         except (EOFError, KeyboardInterrupt):
             print("\nOperation cancelled by user.", flush=True)
             return False, True, f"User cancelled {tool_name} operation"
@@ -934,12 +988,21 @@ def edit_file(path: str, hunks: list = None, precondition: dict = None, dry_run:
                 new_text = content + (original_text or "")
 
             if dry_run:
+                diff = difflib.unified_diff(
+                    (original_text or "").splitlines(keepends=True),
+                    (new_text or "").splitlines(keepends=True),
+                    fromfile=f"a/{os.path.basename(resolved_path)}",
+                    tofile=f"b/{os.path.basename(resolved_path)}",
+                    lineterm='\n'
+                )
+                diff_text = ''.join(diff)
                 result = {
                     "success": True,
                     "path": resolved_path,
                     "applied": False,
                     "mode": mode,
                     "bytes_new": len(new_text.encode('utf-8')),
+                    "diff": diff_text
                 }
                 return True, json.dumps(result)
 
@@ -954,6 +1017,15 @@ def edit_file(path: str, hunks: list = None, precondition: dict = None, dry_run:
                 tmp_path = tmp.name
             os.rename(tmp_path, resolved_path)
 
+            diff = difflib.unified_diff(
+                (original_text or "").splitlines(keepends=True),
+                (new_text or "").splitlines(keepends=True),
+                fromfile=f"a/{os.path.basename(resolved_path)}",
+                tofile=f"b/{os.path.basename(resolved_path)}",
+                lineterm='\n'
+            )
+            diff_text = ''.join(diff)
+
             result = {
                 "success": True,
                 "path": resolved_path,
@@ -962,6 +1034,7 @@ def edit_file(path: str, hunks: list = None, precondition: dict = None, dry_run:
                 "sha256_before": _compute_sha256(original_text),
                 "sha256_after": _compute_sha256(new_text),
                 "bytes_written": len(new_text.encode('utf-8')),
+                "diff": diff_text,
                 "created": not existed and mode == "overwrite"
             }
             return True, json.dumps(result)
@@ -1696,10 +1769,15 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
         allowed, should_terminate, error_msg = ask_user_permission(name, arguments)
         if not allowed:
             if should_terminate:
-                import sys
-                print(f"\n\u274c Agent terminated: {error_msg}", flush=True)
-                sys.exit(1)
-            return False, error_msg
+                if EXIT_ON_TERMINATE:
+                    import sys
+                    print(f"\n\u274c Agent terminated: {error_msg}", flush=True)
+                    sys.exit(1)
+                else:
+                    raise PermissionDeniedTerminate(error_msg or f"User denied {name} operation")
+            # Non-terminating denial: surface as tool_result content
+            denial_msg = error_msg or f"User denied {name} operation"
+            return False, f"Denied: {denial_msg}"
     
     significant_action_tools = ["read_file", "edit_file", "create_file", "delete_file", "delete_path", "mkdir", "run_command"]
     if name in significant_action_tools and CURRENT_PLAN is not None:

@@ -82,33 +82,16 @@ EOF
 
 echo "版本信息文件已生成: version.py"
 
-# 创建一个临时的 spec 文件，包含版本信息
+# Build binary directly as tricode
 if [ -f tricode.spec ]; then
-    # 复制 spec 文件并添加版本信息到 exe 名称
-    cp tricode.spec tricode_versioned.spec
-    # 修改输出文件名以包含版本号
-    sed -i "s/name='tricode'/name='tricode-${VERSION}'/g" tricode_versioned.spec
-    pyinstaller tricode_versioned.spec
-    # 清理临时文件
-    rm -f tricode_versioned.spec
-    # 创建一个不带版本号的符号链接，方便使用
-    if [ -f "dist/tricode-${VERSION}" ]; then
-        ln -sf "tricode-${VERSION}" dist/tricode
-    fi
+    pyinstaller tricode.spec
 else
-    pyinstaller --onefile --name "tricode-${VERSION}" \
+    pyinstaller --onefile --name "tricode" \
         --hidden-import=tiktoken_ext \
         --hidden-import=tiktoken_ext.openai_public \
         --collect-data tiktoken_ext \
         tricode.py
-    # 创建一个不带版本号的符号链接
-    if [ -f "dist/tricode-${VERSION}" ]; then
-        ln -sf "tricode-${VERSION}" dist/tricode
-    fi
 fi
 
-echo "打包完成！"
-echo "版本化二进制文件: dist/tricode-${VERSION}"
-if [ -L dist/tricode ]; then
-    echo "通用符号链接: dist/tricode -> tricode-${VERSION}"
-fi
+echo "Build complete!"
+echo "Binary: dist/tricode"

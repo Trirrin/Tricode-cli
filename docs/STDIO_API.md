@@ -90,8 +90,8 @@ Agent 调用某个工具时触发。
 {
   "type": "tool_call",
   "name": "read_file",
-  "arguments": {"path": "tricode.py", "ranges": [[1, 10]]},
-  "formatted": "READ(\"tricode.py\", lines=[1-10])"
+  "arguments": {"path": "tricode.py", "start_line": 1, "end_line": 10},
+  "formatted": "READ(\"tricode.py\", start=1, end=10)"
 }
 ```
 
@@ -233,13 +233,14 @@ tricode --stdio "list files in current directory"
 - `exist_ok` 控制已存在时是否报错，默认false（即存在时报错）。
 
 ### read_file
-读取文件内容。
+读取文件内容（默认整文件）。支持行窗口与字节上限。
 
 **参数：**
 ```json
-{"path": "tricode.py", "ranges": [[1, 10]], "with_metadata": false}
+{"path": "tricode.py", "start_line": 1, "end_line": 10, "max_bytes": 4096, "with_metadata": false}
 ```
-- `ranges` 可选，指定读取的行范围（从 1 开始）。`end` 可超出文件长度，将被安全裁剪到 EOF。
+- `start_line`/`end_line` 可选，1 基，包含端点；未提供时读全文件。
+- `max_bytes` 可选，按 UTF-8 字节截断（安全丢弃半个字符）。
 - `with_metadata` 可选，默认为 `false`。为 `true` 时返回 JSON 对象：
   ```json
   {
@@ -250,7 +251,7 @@ tricode --stdio "list files in current directory"
     "content": "...file content..."
   }
   ```
-  推荐配合 `edit_file.precondition.file_sha256` 使用以避免竞争条件。
+  可与 `edit_file.precondition.file_sha256` 搭配以提升安全性（可选）。
 
 ---
 
@@ -265,23 +266,23 @@ tricode --stdio "list files in current directory"
 ---
 
 ### edit_file
-使用基于锚点的 hunk 操作编辑文件，减少行号漂移与 token 消耗。
+两种模式：
+- 简单模式（推荐）：整文件覆盖/追加/前置，最稳健，最省 token。
+- Patch 模式：基于锚点的精确编辑（exact/regex），适合局部修改。
 
-**参数：**
+简单模式参数示例：
+```json
+{"path": "README.md", "mode": "overwrite", "content": "# Title\nNew content..."}
+```
+
+Patch 模式参数示例：
 ```json
 {
   "path": "tricode.py",
+  "mode": "patch",
   "hunks": [
-    {
-      "op": "replace",
-      "anchor": {"type": "exact", "pattern": "def main():"},
-      "content": "def main():\n    print(\"hi\")\n"
-    },
-    {
-      "op": "insert_after",
-      "anchor": {"type": "regex", "pattern": "^class Runner\\(.*\\):$", "occurrence": "first"},
-      "content": "\n    # new method\n    def ping(self):\n        return 'pong'\n"
-    }
+    {"op": "replace", "anchor": {"type": "exact", "pattern": "def main():"}, "content": "def main():\n    print('hi')\n"},
+    {"op": "insert_after", "anchor": {"type": "regex", "pattern": "^class Runner\\(.*\\):$", "occurrence": "first"}, "content": "\n    def ping(self):\n        return 'pong'\n"}
   ],
   "precondition": {"file_sha256": "<optional sha256>"},
   "dry_run": false
@@ -289,8 +290,9 @@ tricode --stdio "list files in current directory"
 ```
 
 说明：
-- `anchor.nth`（1-based）用于选择第 n 个匹配；当提供 `nth` 或使用 `occurrence: "last"` 时，不强制唯一匹配。
-- 结果 JSON 额外包含 `sha256_before` 与 `sha256_after` 字段，便于后续链式操作。
+- `mode` 缺省为 `patch`。简单模式必须提供 `content`；`overwrite` 支持新建文件。
+- `precondition.file_sha256` 为可选；若提供且不匹配则拒绝写入。
+- `anchor.nth`（1-based）用于选择第 n 个匹配；提供 `nth` 或 `occurrence: "last"` 时不强制唯一匹配。
 
 ---
 

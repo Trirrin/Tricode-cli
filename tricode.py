@@ -18,11 +18,12 @@ except ImportError:
 
 
 class VersionedHelpFormatter(argparse.RawDescriptionHelpFormatter):
-    """Custom help formatter that includes version info in the header"""
+    """Custom help formatter that includes version info in the header unless just showing version"""
     def format_help(self):
-        # Get the original help text
+        # Suppress version at top if only --version is being executed
+        if '--version' in sys.argv or '-V' in sys.argv:
+            return super().format_help()
         help_text = super().format_help()
-        # Add version info at the beginning
         version_line = f"{get_runtime_version()}\n\n"
         return version_line + help_text
 

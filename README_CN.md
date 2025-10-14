@@ -167,7 +167,9 @@ export TRICODE_OPENAI_MODEL="gpt-4o"
 ```
 
 提示：
-- `read_file` 支持 `with_metadata=true` 返回包含 `{path, total_lines, mtime, sha256, content}` 的 JSON，推荐与 `edit_file.precondition.file_sha256` 配合，避免并发导致的误编辑。
+- `read_file` 支持 `with_metadata=true` 返回 `{path, total_lines, mtime, sha256, content}`。
+- 整文件修改优先用简单模式：`edit_file(mode='overwrite'|'append'|'prepend', content=...)`，更稳、更省 token。
+- 局部精确修改再用 Patch：`edit_file(mode='patch', hunks=[...])`。`precondition.file_sha256` 可选但推荐在并发场景下使用。
 
 ## 使用示例
 

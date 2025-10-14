@@ -167,7 +167,9 @@ Features:
 ```
 
 Tips:
-- `read_file` supports `with_metadata=true` to return JSON with `{path, total_lines, mtime, sha256, content}` for safer chaining with `edit_file.precondition.file_sha256`.
+- `read_file` supports `with_metadata=true` to return JSON with `{path, total_lines, mtime, sha256, content}`.
+- Prefer simple edits for whole-file changes: `edit_file(mode='overwrite'|'append'|'prepend', content=...)`.
+- Use patch mode for precise anchor-based changes: `edit_file(mode='patch', hunks=[...])`. `precondition.file_sha256` is optional but recommended when race conditions matter.
 
 ## Examples
 

@@ -7,7 +7,8 @@ from datetime import datetime
 from typing import Union, Any
 from openai import OpenAI, APITimeoutError, RateLimitError, APIConnectionError, InternalServerError
 from anthropic import Anthropic, APIError as AnthropicAPIError, RateLimitError as AnthropicRateLimitError
-from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, get_plan_reminder, get_plan_final_reminder, set_session_id, restore_plan, set_work_dir, WORK_DIR
+from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, get_plan_reminder, get_plan_final_reminder, set_session_id, restore_plan, set_work_dir
+from . import tools as tools_module
 from .config import load_config, get_provider_config, CONFIG_FILE
 from .output import HumanWriter, JsonWriter
 import difflib
@@ -738,7 +739,20 @@ def format_tool_result(tool_name: str, success: bool, result: str, arguments: di
         return f"[FAIL] {result}"
     
     if tool_name == "read_file":
-        lines = result.count('\n')
+        # Display should reflect real line count even when with_metadata=true
+        # When with_metadata=true, the tool returns a JSON string and newlines are escaped, so counting \n is misleading.
+        try:
+            if arguments and arguments.get("with_metadata", False):
+                data = json.loads(result)
+                # Prefer explicit total_lines if present; otherwise fall back to counting content lines.
+                if isinstance(data, dict) and "total_lines" in data:
+                    return f"[OK] read {data['total_lines']} lines"
+                content = data.get("content", "") if isinstance(data, dict) else ""
+                return f"[OK] read {content.count('\n') + (0 if content.endswith('\n') else (1 if content else 0))} lines"
+        except Exception:
+            pass
+        # Non-metadata mode: count actual newlines from plain text content
+        lines = result.count('\n') + (0 if result.endswith('\n') else (1 if result else 0))
         return f"[OK] read {lines} lines"
     elif tool_name == "create_file":
         if arguments and 'content' in arguments:
@@ -749,9 +763,19 @@ def format_tool_result(tool_name: str, success: bool, result: str, arguments: di
         # CLI 简要统计，TUI 渲染原始 diff
         try:
             result_data = json.loads(result)
+            # Simple modes summary without diff
+            mode = result_data.get("mode")
+            if mode and mode != "patch":
+                if result_data.get("applied"):
+                    bw = result_data.get("bytes_written") or result_data.get("bytes_new")
+                    if bw:
+                        return f"[OK] {mode} {bw} bytes"
+                    return f"[OK] {mode} done"
+                else:
+                    return f"[OK] {mode} dry-run"
             diff_text = result_data.get("diff", "")
             if not diff_text:
-                return "[OK] no changes made"
+                return "[OK] edited successfully"
 
             lines = diff_text.split('\n')
             added = deleted = 0
@@ -914,7 +938,7 @@ def build_system_prompt(allowed_tools: list = None, override_system_prompt: bool
     )
     
     work_dir_section = (
-        f"WORKING DIRECTORY: {WORK_DIR}\n"
+        f"WORKING DIRECTORY: {tools_module.WORK_DIR}\n"
         f"All relative paths (like '.', 'file.txt', 'subdir/') are relative to this directory.\n\n"
     )
     
@@ -969,7 +993,8 @@ def build_system_prompt(allowed_tools: list = None, override_system_prompt: bool
         principles.append("4. Search first: When uncertain about file names or locations, use search_context")
     if has_read and has_edit:
         principles.append(f"{len(principles) + 1}. Verify before acting: Read files before modifying them")
-        principles.append(f"{len(principles) + 1}. Use preconditions for edits: Read via read_file(with_metadata=true) to get sha256, then set edit_file.precondition.file_sha256 before modifying")
+        principles.append(f"{len(principles) + 1}. Prefer simple edits: use edit_file(mode='overwrite'|'append'|'prepend', content=...) for whole-file changes")
+        principles.append(f"{len(principles) + 1}. Use patch mode for precision: edit_file(mode='patch', hunks=[...]) with anchors; precondition sha256 is optional but recommended for safety")
     principles.append(f"{len(principles) + 1}. Track progress: Update plan status after each task completion")
     
     tools_section += "Core principles:\n" + "\n".join(principles) + "\n\n"
@@ -981,7 +1006,9 @@ def build_system_prompt(allowed_tools: list = None, override_system_prompt: bool
             examples.append("- Unclear request? Search to understand the codebase structure")
         if has_read and has_edit:
             examples.append("- Before editing? Read the file first to understand context")
-            examples.append("- Safe edit flow: read_file(with_metadata=true) -> use returned sha256 as edit_file.precondition.file_sha256 -> apply hunks (use occurrence=last or anchor.nth to disambiguate)")
+            examples.append("- For whole-file changes, prefer simple modes: edit_file(mode='overwrite'|'append'|'prepend', content=...)")
+            examples.append("- For precise changes, use edit_file(mode='patch', hunks=[...]); precondition sha256 is optional for safety")
+            examples.append("- For multi-line regex anchors, prefer [\\s\\S]*? or set anchor.dotall=true")
         tools_section += "\n".join(examples) + "\n\n"
     
     tools_section += (

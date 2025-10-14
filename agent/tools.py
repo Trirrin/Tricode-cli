@@ -180,7 +180,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read file content, optionally reading only specified line ranges. Optionally include metadata for safe edit chaining.",
+            "description": "Read file content simply. Defaults to full text; optionally limit by lines or bytes; metadata optional.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -188,15 +188,17 @@ TOOLS_SCHEMA = [
                         "type": "string",
                         "description": "The file path to read"
                     },
-                    "ranges": {
-                        "type": "array",
-                        "description": "Optional list of line ranges to read, e.g., [[1, 10], [20, 30]]. Line numbers start from 1. If not provided, reads entire file.",
-                        "items": {
-                            "type": "array",
-                            "items": {"type": "integer"},
-                            "minItems": 2,
-                            "maxItems": 2
-                        }
+                    "start_line": {
+                        "type": "integer",
+                        "description": "1-based start line (inclusive). If set without end_line, reads from start_line to EOF."
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "1-based end line (inclusive). Ignored if start_line not set."
+                    },
+                    "max_bytes": {
+                        "type": "integer",
+                        "description": "If set, truncate output to at most this many bytes (UTF-8)."
                     },
                     "with_metadata": {
                         "type": "boolean",
@@ -233,7 +235,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "Edit a file using robust anchor-based hunks to replace/insert/delete content with minimal token footprint.",
+            "description": "Edit file in two ways: simple modes (overwrite/append/prepend with content) or patch mode using hunks (regex/exact anchors). Precondition is optional.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -241,9 +243,19 @@ TOOLS_SCHEMA = [
                         "type": "string",
                         "description": "Target file path"
                     },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["overwrite", "append", "prepend", "patch"],
+                        "description": "Simple modes operate on whole-file content; patch mode uses hunks.",
+                        "default": "patch"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "File content for simple modes (overwrite/append/prepend)."
+                    },
                     "hunks": {
                         "type": "array",
-                        "description": "List of operations. Each hunk locates an anchor (exact or regex) and applies an op: replace | insert_before | insert_after | delete.",
+                        "description": "Patch operations for mode='patch'. Each hunk: op replace|insert_before|insert_after|delete with anchor (exact/regex).",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -254,12 +266,15 @@ TOOLS_SCHEMA = [
                                         "type": {"type": "string", "enum": ["exact", "regex"]},
                                         "pattern": {"type": "string"},
                                         "occurrence": {"type": "string", "enum": ["first", "last"], "default": "first"},
-                                        "nth": {"type": "integer", "minimum": 1, "description": "If set, match the n-th occurrence (1-based)"}
+                                        "nth": {"type": "integer", "minimum": 1, "description": "If set, match the n-th occurrence (1-based)"},
+                                        "dotall": {"type": "boolean", "description": "Regex DOTALL mode"},
+                                        "ignorecase": {"type": "boolean", "description": "Regex IGNORECASE mode"},
+                                        "range": {"type": "array", "description": "Optional [start_line, end_line] search window", "items": {"type": "integer"}}
                                     },
                                     "required": ["type", "pattern"]
                                 },
                                 "content": {"type": "string", "description": "New text for replace/insert ops"},
-                                "must_unique": {"type": "boolean", "default": True}
+                                "must_unique": {"type": "boolean", "default": False}
                             },
                             "required": ["op", "anchor"]
                         }
@@ -267,12 +282,12 @@ TOOLS_SCHEMA = [
                     "precondition": {
                         "type": "object",
                         "properties": {
-                            "file_sha256": {"type": "string", "description": "Optional whole-file sha256 to ensure we edit the expected version"}
+                            "file_sha256": {"type": "string", "description": "Optional whole-file sha256 to guard against stale edits"}
                         }
                     },
                     "dry_run": {"type": "boolean", "default": False}
                 },
-                "required": ["path", "hunks"]
+                "required": ["path"]
             }
         }
     },
@@ -607,7 +622,10 @@ def delete_path(path: str, recursive: bool = False) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Delete failed: {str(e)}"
 
-def read_file(path: str, ranges: list = None, with_metadata: bool = False) -> Tuple[bool, str]:
+def read_file(path: str, start_line: int = None, end_line: int = None, max_bytes: int = None, with_metadata: bool = False) -> Tuple[bool, str]:
+    """Simple file read with optional line window and byte cap.
+    Full file by default; clamps safely when limited.
+    """
     resolved_path = resolve_path(path)
     valid, err_msg = validate_path(resolved_path)
     if not valid:
@@ -615,25 +633,24 @@ def read_file(path: str, ranges: list = None, with_metadata: bool = False) -> Tu
     
     try:
         with open(resolved_path, 'r', encoding='utf-8') as f:
-            if ranges is None:
-                content = f.read()
-            else:
+            if start_line is not None:
                 lines = f.readlines()
-                selected_lines = []
-                for start, end in ranges:
-                    if start < 1 or start > len(lines):
-                        return False, f"Invalid range start: {start}, file has {len(lines)} lines"
-                    # allow end to exceed file length; clamp at EOF for practicality
-                    end_clamped = min(end, len(lines))
-                    if start > end_clamped:
-                        return False, f"Invalid range: ({start}, {end}), file has {len(lines)} lines"
-                    selected_lines.extend(lines[start-1:end_clamped])
-                content = ''.join(selected_lines)
+                total = len(lines)
+                s = max(1, int(start_line))
+                e = int(end_line) if end_line is not None else total
+                e = max(s, min(e, total))
+                content = ''.join(lines[s-1:e])
+            else:
+                content = f.read()
+
+        if isinstance(max_bytes, int) and max_bytes is not None and max_bytes >= 0:
+            b = content.encode('utf-8')
+            if len(b) > max_bytes:
+                content = b[:max_bytes].decode('utf-8', errors='ignore')
 
         if not with_metadata:
             return True, content
 
-        # Build metadata for better edit chaining
         stat_info = os.stat(resolved_path)
         meta = {
             "path": resolved_path,
@@ -760,56 +777,154 @@ def _find_matches(text: str, anchor: dict) -> list:
     # return list of (start, end) spans for anchor
     a_type = anchor.get("type")
     pattern = anchor.get("pattern", "")
-    if a_type == "regex":
+    # Optional line range limiter: [start_line, end_line] (1-based, inclusive)
+    base_offset = 0
+    if isinstance(anchor.get("range"), (list, tuple)) and len(anchor.get("range")) == 2:
         try:
-            rgx = re.compile(pattern, re.MULTILINE)
+            start_line, end_line = anchor.get("range")
+            if isinstance(start_line, int) and isinstance(end_line, int) and start_line >= 1 and end_line >= start_line:
+                line_starts = _build_line_starts(text)
+                # clamp to file length
+                max_line = _index_to_line(len(text), line_starts)
+                end_line = min(end_line, max_line)
+                # convert to offsets
+                base_offset = line_starts[start_line - 1]
+                end_offset = line_starts[end_line - 1] if end_line - 1 < len(line_starts) else len(text)
+                # include the full end line by extending to next line start or EOF
+                if end_line - 1 < len(line_starts) - 1:
+                    end_offset = line_starts[end_line]
+                search_text = text[base_offset:end_offset]
+            else:
+                search_text = text
+        except Exception:
+            search_text = text
+    else:
+        search_text = text
+    if a_type == "regex":
+        # Compile with configurable flags. Default to MULTILINE to keep behavior stable.
+        # Allow callers to opt-in to DOTALL (multi-line wildcard) and IGNORECASE.
+        flags = re.MULTILINE
+        if anchor.get("dotall"):
+            flags |= re.DOTALL
+        if anchor.get("ignorecase"):
+            flags |= re.IGNORECASE
+        try:
+            rgx = re.compile(pattern, flags)
         except re.error as e:
             raise ValueError(f"Invalid regex: {e}")
-        return [(m.start(), m.end()) for m in rgx.finditer(text)]
+        return [
+            (base_offset + m.start(), base_offset + m.end())
+            for m in rgx.finditer(search_text)
+        ]
     elif a_type == "exact":
         spans = []
         start = 0
         while True:
-            i = text.find(pattern, start)
+            i = search_text.find(pattern, start)
             if i == -1:
                 break
-            spans.append((i, i + len(pattern)))
+            spans.append((base_offset + i, base_offset + i + len(pattern)))
             start = i + (1 if len(pattern) == 0 else max(1, len(pattern)))
         return spans
     else:
         raise ValueError("Unsupported anchor.type; use 'exact' or 'regex'")
 
 
-def edit_file(path: str, hunks: list, precondition: dict = None, dry_run: bool = False) -> Tuple[bool, str]:
+def edit_file(path: str, hunks: list = None, precondition: dict = None, dry_run: bool = False, mode: str = "patch", content: str = None) -> Tuple[bool, str]:
+    """Unified edit entry with simple modes and patch mode.
+    Simple: overwrite/append/prepend with top-level content; Patch: anchor-based hunks.
+    Precondition is optional: mismatch aborts if provided, otherwise proceed.
+    """
     resolved_path = resolve_path(path)
     valid, err_msg = validate_path(resolved_path)
     if not valid:
         return False, err_msg
 
+    mode = (mode or "patch").strip().lower()
+    if mode not in ("overwrite", "append", "prepend", "patch"):
+        return False, f"Unsupported mode: {mode}"
+
+    original_text = ""
+    existed = os.path.exists(resolved_path)
     try:
-        with open(resolved_path, 'r', encoding='utf-8') as f:
-            original_text = f.read()
+        if existed:
+            with open(resolved_path, 'r', encoding='utf-8') as f:
+                original_text = f.read()
+        elif mode != "overwrite" and not dry_run:
+            return False, f"File not found: {resolved_path}"
 
         if precondition and precondition.get("file_sha256"):
             cur = _compute_sha256(original_text)
             if cur != precondition.get("file_sha256"):
-                return False, f"Precondition failed: file sha256 mismatch"
+                return False, "Precondition failed: file sha256 mismatch"
 
+        if mode in ("overwrite", "append", "prepend"):
+            if content is None:
+                return False, "Content required for simple modes"
+            if mode == "overwrite":
+                new_text = content
+            elif mode == "append":
+                new_text = (original_text or "") + content
+            else:
+                new_text = content + (original_text or "")
+
+            if dry_run:
+                result = {
+                    "success": True,
+                    "path": resolved_path,
+                    "applied": False,
+                    "mode": mode,
+                    "bytes_new": len(new_text.encode('utf-8')),
+                }
+                return True, json.dumps(result)
+
+            dir_path = os.path.dirname(resolved_path)
+            with tempfile.NamedTemporaryFile(
+                mode='w',
+                encoding='utf-8',
+                dir=dir_path or '.',
+                delete=False
+            ) as tmp:
+                tmp.write(new_text)
+                tmp_path = tmp.name
+            os.rename(tmp_path, resolved_path)
+
+            result = {
+                "success": True,
+                "path": resolved_path,
+                "applied": True,
+                "mode": mode,
+                "sha256_before": _compute_sha256(original_text),
+                "sha256_after": _compute_sha256(new_text),
+                "bytes_written": len(new_text.encode('utf-8')),
+                "created": not existed and mode == "overwrite"
+            }
+            return True, json.dumps(result)
+
+        # Patch mode
         text = original_text
         applied = 0
         matches_meta = []
+        if not hunks:
+            return False, "Missing hunks for patch mode"
 
         for h in hunks:
             op = h.get("op")
             anchor = h.get("anchor") or {}
-            must_unique = h.get("must_unique", True)
-            content = h.get("content", "")
+            must_unique = h.get("must_unique", False)
+            h_content = h.get("content", "")
 
             spans = _find_matches(text, anchor)
             if not spans:
-                return False, f"Anchor not found for op={op}"
+                hint = ""
+                if anchor.get("type") == "regex":
+                    pat = anchor.get("pattern", "")
+                    if ".*" in pat and not anchor.get("dotall"):
+                        hint = " Consider setting anchor.dotall=true or using [\\s\\S]*? for multi-line matches."
+                if anchor.get("range"):
+                    hint += " Verify that anchor.range covers the intended lines."
+                return False, f"Anchor not found for op={op}.{hint}"
 
-            # choose occurrence (nth belongs to anchor schema)
             nth = anchor.get("nth")
             occ = anchor.get("occurrence", "first")
             if nth is not None:
@@ -819,25 +934,22 @@ def edit_file(path: str, hunks: list, precondition: dict = None, dry_run: bool =
             else:
                 idx = 0
 
-            # Only enforce uniqueness when not explicitly disambiguated
             if must_unique and nth is None and occ == "first" and len(spans) != 1:
-                return False, f"Anchor ambiguous: {len(spans)} matches"
-
+                return False, f"Anchor ambiguous: {len(spans)} matches. Specify anchor.nth or anchor.occurrence, or set must_unique=false."
             if idx < 0 or idx >= len(spans):
-                return False, f"Requested occurrence not found"
+                return False, "Requested occurrence not found"
 
             s, e = spans[idx]
-            # record line mapping for this hunk
             line_starts = _build_line_starts(text)
             start_line = _index_to_line(s, line_starts)
             end_line = _index_to_line(e - 1 if e > s else s, line_starts)
 
             if op == "replace":
-                text = text[:s] + content + text[e:]
+                text = text[:s] + h_content + text[e:]
             elif op == "insert_before":
-                text = text[:s] + content + text[s:]
+                text = text[:s] + h_content + text[s:]
             elif op == "insert_after":
-                text = text[:e] + content + text[e:]
+                text = text[:e] + h_content + text[e:]
             elif op == "delete":
                 text = text[:s] + text[e:]
             else:
@@ -853,7 +965,6 @@ def edit_file(path: str, hunks: list, precondition: dict = None, dry_run: bool =
             })
 
         if dry_run:
-            # compute diff without writing
             diff = difflib.unified_diff(
                 original_text.splitlines(keepends=True),
                 text.splitlines(keepends=True),
@@ -866,6 +977,7 @@ def edit_file(path: str, hunks: list, precondition: dict = None, dry_run: bool =
                 "success": True,
                 "path": resolved_path,
                 "applied": False,
+                "mode": "patch",
                 "hunks_applied": applied,
                 "matches": matches_meta,
                 "diff": diff_text
@@ -881,7 +993,6 @@ def edit_file(path: str, hunks: list, precondition: dict = None, dry_run: bool =
         ) as tmp:
             tmp.write(text)
             tmp_path = tmp.name
-
         os.rename(tmp_path, resolved_path)
 
         diff = difflib.unified_diff(
@@ -897,16 +1008,14 @@ def edit_file(path: str, hunks: list, precondition: dict = None, dry_run: bool =
             "success": True,
             "path": resolved_path,
             "applied": True,
+            "mode": "patch",
             "hunks_applied": applied,
             "matches": matches_meta,
             "sha256_before": _compute_sha256(original_text),
             "sha256_after": _compute_sha256(text),
             "diff": diff_text
         }
-
         return True, json.dumps(result)
-    except FileNotFoundError:
-        return False, f"File not found: {resolved_path}"
     except Exception as e:
         return False, f"Edit failed: {str(e)}"
 
@@ -1429,17 +1538,29 @@ def format_tool_call(name: str, arguments: dict) -> str:
         return f'SEARCH(pattern="{pattern}", path="{path}")'
     elif name == "read_file":
         path = arguments.get("path", "")
-        ranges = arguments.get("ranges")
-        if ranges:
-            ranges_str = ", ".join([f"{start}-{end}" for start, end in ranges])
-            return f'READ("{path}", lines=[{ranges_str}])'
-        return f'READ("{path}")'
+        s = arguments.get("start_line")
+        e = arguments.get("end_line")
+        mb = arguments.get("max_bytes")
+        meta = arguments.get("with_metadata", False)
+        parts = [f'"{path}"']
+        if s is not None:
+            parts.append(f'start={s}')
+            if e is not None:
+                parts.append(f'end={e}')
+        if mb is not None:
+            parts.append(f'max={mb}B')
+        if meta:
+            parts.append('meta')
+        return f'READ({", ".join(parts)})'
     elif name == "create_file":
         path = arguments.get("path", "")
         return f'CREATE("{path}")'
     elif name == "edit_file":
         path = arguments.get("path", "")
+        mode = arguments.get("mode", "patch")
         hunks = arguments.get("hunks", [])
+        if mode != "patch":
+            return f'EDIT("{path}", mode={mode})'
         if hunks:
             return f'EDIT("{path}", hunks={len(hunks)})'
         return f'EDIT("{path}")'
@@ -1517,9 +1638,11 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
         )
     elif name == "read_file":
         return read_file(
-            arguments.get("path"),
-            arguments.get("ranges"),
-            arguments.get("with_metadata", False)
+            path=arguments.get("path"),
+            start_line=arguments.get("start_line"),
+            end_line=arguments.get("end_line"),
+            max_bytes=arguments.get("max_bytes"),
+            with_metadata=arguments.get("with_metadata", False)
         )
     elif name == "create_file":
         return create_file(
@@ -1528,10 +1651,12 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
         )
     elif name == "edit_file":
         return edit_file(
-            arguments.get("path"),
-            arguments.get("hunks"),
-            arguments.get("precondition"),
-            arguments.get("dry_run", False)
+            path=arguments.get("path"),
+            hunks=arguments.get("hunks"),
+            precondition=arguments.get("precondition"),
+            dry_run=arguments.get("dry_run", False),
+            mode=arguments.get("mode", "patch"),
+            content=arguments.get("content")
         )
     elif name == "list_directory":
         return list_directory(

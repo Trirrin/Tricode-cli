@@ -270,15 +270,30 @@ def convert_tools_to_anthropic(openai_tools: list) -> list:
     return anthropic_tools
 
 def convert_messages_for_anthropic(openai_messages: list) -> tuple[str, list]:
-    system_content = ""
+    """Convert OpenAI-style messages to Anthropic format.
+
+    - Merge multiple system messages into one system string.
+    - Convert tool messages to Anthropic tool_result blocks.
+    - Ensure the conversation starts with a user turn (Anthropic requirement).
+    """
+    system_content_parts = []
     anthropic_messages = []
-    
+
     for msg in openai_messages:
         role = msg.get("role")
         content = msg.get("content", "")
-        
+
         if role == "system":
-            system_content = content
+            # Merge all system prompts to avoid losing earlier instructions
+            if isinstance(content, str):
+                system_content_parts.append(content)
+            elif isinstance(content, list):
+                # Flatten any text blocks
+                merged = "\n\n".join(
+                    blk.get("text", "") for blk in content if isinstance(blk, dict) and blk.get("type") == "text"
+                )
+                if merged:
+                    system_content_parts.append(merged)
         elif role == "assistant":
             tool_calls = msg.get("tool_calls")
             if tool_calls:
@@ -307,7 +322,13 @@ def convert_messages_for_anthropic(openai_messages: list) -> tuple[str, list]:
             })
         elif role == "user":
             anthropic_messages.append({"role": "user", "content": content})
-    
+
+    # Ensure Anthropic conversation starts with a user message
+    first_user_idx = next((i for i, m in enumerate(anthropic_messages) if m.get("role") == "user"), None)
+    if first_user_idx is not None and first_user_idx != 0:
+        anthropic_messages = anthropic_messages[first_user_idx:]
+
+    system_content = "\n\n".join(p for p in system_content_parts if p)
     return system_content, anthropic_messages
 
 def convert_anthropic_to_openai_response(anthropic_response: Any, model: str) -> Any:
@@ -551,7 +572,8 @@ def call_anthropic_with_retry(client: Anthropic, model: str, messages: list, too
             }
             
             if system_content:
-                kwargs["system"] = system_content
+                # Send system as explicit text block for robustness
+                kwargs["system"] = [{"type": "text", "text": system_content}]
             
             if anthropic_tools:
                 kwargs["tools"] = anthropic_tools

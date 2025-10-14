@@ -1,4 +1,4 @@
-name: Build with PyInstaller
+name: Build Release Multi-platform
 
 on:
   push:
@@ -11,53 +11,92 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # --- Linux ---
+          - os: ubuntu-latest
+            arch: x86_64
+            asset_suffix: linux-x86_64
+            docker_platform: linux/amd64
+          - os: ubuntu-latest
+            arch: arm64
+            asset_suffix: linux-arm64
+            docker_platform: linux/arm64
+          # --- MacOS ---
+          - os: macos-14 # arm64 runner
+            arch: arm64
+            asset_suffix: macos-arm64
+          - os: macos-13 # x86_64 runner
+            arch: x86_64
+            asset_suffix: macos-x86_64
+          # --- Windows ---
+          - os: windows-latest
+            arch: x86_64
+            asset_suffix: windows-x86_64
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # 获取完整的 git 历史，确保能获取 commit 信息
+
+      # ==== Linux（本机/容器多架构） ====
+      - name: Set up QEMU for ARM
+        if: startsWith(matrix.os, 'ubuntu')
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.x'
 
-      - name: Install dependencies
+      - name: Build on Linux Multi-Arch (via Docker)
+        if: startsWith(matrix.os, 'ubuntu')
         run: |
-          pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install pyinstaller
-      - name: Determine version
-        id: version
-        run: |
-          # 获取版本号：优先使用 tag，其次使用 release tag，最后默认为 dev
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/}
-          elif [[ "${{ github.event_name }}" == "release" ]]; then
-            VERSION=${{ github.event.release.tag_name }}
-          else
-            VERSION="dev-${GITHUB_SHA:0:7}"
-          fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "构建版本: $VERSION"
+          docker run --rm --platform=${{ matrix.docker_platform }} \
+            -v $PWD:/workspace -w /workspace \
+            python:3 bash -c "
+              apt-get update && apt-get install -y gcc && \
+              pip install -r requirements.txt && pip install pyinstaller && \
+              chmod +x build.sh && ./build.sh auto && \
+              cp -r dist dist_${{ matrix.asset_suffix }}
+            "
+          mkdir -p release
+          cp dist_${{ matrix.asset_suffix }}/tricode* release/tricode-${{ matrix.asset_suffix }}
 
-      - name: Build with PyInstaller
+      # ==== MacOS ====
+      - name: Build on macOS
+        if: startsWith(matrix.os, 'macos')
         run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
           chmod +x build.sh
-          ./build.sh ${{ steps.version.outputs.version }}
+          ./build.sh auto
+          mkdir -p release
+          cp dist/tricode* release/tricode-${{ matrix.asset_suffix }}
+
+      # ==== Windows ====
+      - name: Build on Windows
+        if: startsWith(matrix.os, 'windows')
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+          chmod +x build.sh
+          ./build.sh auto
+          mkdir release
+          cp dist/tricode.exe release/tricode-${{ matrix.asset_suffix }}.exe
 
       - name: Upload artifact
-        if: github.event_name != 'release'
         uses: actions/upload-artifact@v4
         with:
-          name: tricode-${{ steps.version.outputs.version }}
-          path: dist/
-
+          name: tricode-${{ matrix.asset_suffix }}
+          path: |
+            release/tricode-${{ matrix.asset_suffix }}*
+          
       - name: Upload to release
         if: github.event_name == 'release'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload ${{ github.event.release.tag_name }} dist/* --clobber
+          gh release upload ${{ github.event.release.tag_name }} release/tricode-${{ matrix.asset_suffix }}* --clobber

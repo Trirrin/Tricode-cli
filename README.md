@@ -4,6 +4,52 @@
 
 A command-line universal agent
 
+## Installation
+
+### Quick Install (Recommended)
+
+One-line installation for pre-built binaries:
+
+**Linux / macOS:**
+```bash
+curl -sSL https://raw.githubusercontent.com/Trirrin/Tricode-cli/main/install_tricode.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/Trirrin/Tricode-cli/main/install_tricode.ps1 | iex
+```
+
+After installation, restart your terminal and run:
+```bash
+tricode --help
+```
+
+### Supported Platforms
+
+- **Linux**: x86_64, ARM64
+- **macOS**: x86_64 (Intel), ARM64 (Apple Silicon M1/M2)
+- **Windows**: x86_64
+
+### Manual Installation
+
+1. Download the binary for your platform from [Releases](https://github.com/Trirrin/Tricode-cli/releases)
+2. Extract and move to a directory in your PATH:
+   - Linux/macOS: `~/.local/bin/tricode`
+   - Windows: Add the directory containing `tricode.exe` to your PATH
+3. Make it executable (Linux/macOS only): `chmod +x tricode`
+
+### Install from Source
+
+If you prefer to run from source:
+
+```bash
+git clone https://github.com/Trirrin/Tricode-cli.git
+cd Tricode-cli
+pip install -r requirements.txt
+./tricode.py "test"
+```
+
 ## Features
 
 - **Search Context**: Search for patterns in your codebase

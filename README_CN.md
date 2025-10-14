@@ -4,6 +4,52 @@
 
 一个命令行通用代理。
 
+## 安装
+
+### 快速安装（推荐）
+
+一键安装预构建的二进制文件：
+
+**Linux / macOS:**
+```bash
+curl -sSL https://raw.githubusercontent.com/Trirrin/Tricode-cli/main/install_tricode.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/Trirrin/Tricode-cli/main/install_tricode.ps1 | iex
+```
+
+安装完成后，重启终端并运行：
+```bash
+tricode --help
+```
+
+### 支持的平台
+
+- **Linux**: x86_64, ARM64
+- **macOS**: x86_64 (Intel), ARM64 (Apple Silicon M1/M2)
+- **Windows**: x86_64
+
+### 手动安装
+
+1. 从 [Releases](https://github.com/Trirrin/Tricode-cli/releases) 下载适合你平台的二进制文件
+2. 解压并移动到 PATH 中的目录：
+   - Linux/macOS: `~/.local/bin/tricode`
+   - Windows: 将包含 `tricode.exe` 的目录添加到 PATH
+3. 添加可执行权限（仅 Linux/macOS）：`chmod +x tricode`
+
+### 从源码安装
+
+如果你希望从源码运行：
+
+```bash
+git clone https://github.com/Trirrin/Tricode-cli.git
+cd Tricode-cli
+pip install -r requirements.txt
+./tricode.py "test"
+```
+
 ## 功能特性
 
 - **搜索上下文**：在代码库中搜索指定模式

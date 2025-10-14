@@ -1,6 +1,8 @@
 import uuid
 import json
 import asyncio
+import os
+import time
 from pathlib import Path
 from datetime import datetime
 from typing import Iterator, Tuple, Union
@@ -8,7 +10,7 @@ from openai import OpenAI
 from anthropic import Anthropic
 import tiktoken
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, TextArea, RichLog, Static, ListView, ListItem, Label
+from textual.widgets import Header, Footer, TextArea, Static, ListView, ListItem, Label
 from textual.containers import Container, Vertical, Horizontal
 from textual.binding import Binding
 from textual import events
@@ -17,7 +19,9 @@ from textual.screen import ModalScreen
 from rich.markdown import Markdown
 from rich.text import Text
 from rich.panel import Panel
+from rich.markup import escape as rich_escape
 from rich.console import Group
+from typing import Optional
 import re
 from .tools import TOOLS_SCHEMA, execute_tool, format_tool_call, set_session_id, set_work_dir, restore_plan
 from .config import load_config, get_provider_config
@@ -127,6 +131,65 @@ def render_diff_rich(diff_text: str, max_lines: int = 200) -> Panel:
         shown += 1
 
     return Panel(body, border_style="#888888")
+
+
+class CollapsibleStatic(Static):
+    """Static with collapsed preview for long content.
+
+    Note: Don't override Textual's internal _render. Use _refresh() instead.
+    """
+    def __init__(self, content: str, *, markdown: bool = False, preview_chars: int = 800, collapsed: bool = True):
+        super().__init__()
+        self._full = content or ""
+        self._markdown = markdown
+        self._preview_chars = max(200, preview_chars)
+        self._collapsed = collapsed and len(self._full) > self._preview_chars
+        self._refresh()
+
+    def toggle(self) -> None:
+        self._collapsed = not self._collapsed
+        self._refresh()
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        """Set collapsed state and refresh if changed."""
+        if bool(collapsed) != bool(self._collapsed):
+            self._collapsed = bool(collapsed)
+            self._refresh()
+
+    def _refresh(self) -> None:
+        if self._collapsed:
+            preview = self._full[: self._preview_chars]
+            suffix = "..." if len(self._full) > self._preview_chars else ""
+            txt = Text(preview + suffix)
+            self.update(txt)
+        else:
+            if self._markdown:
+                self.update(Markdown(self._full))
+            else:
+                self.update(Text(self._full))
+
+
+class LoadMoreItem(ListItem):
+    """Item to request loading more history."""
+    def __init__(self):
+        super().__init__(Label("Load more history..."))
+        self.can_focus = True
+
+
+class MessageItem(ListItem):
+    """Generic chat message item with header and body."""
+    def __init__(self, header: str, header_style: str, body: Static):
+        header_text = Text.from_markup(header_style + header + "[/]")
+        container = Vertical(
+            Static(header_text),
+            body,
+        )
+        super().__init__(container)
+        try:
+            self.add_class("msg-item")
+        except Exception:
+            pass
+        self.body = body
 
 
 def get_available_sessions() -> list:
@@ -723,6 +786,37 @@ class TricodeCLI(App):
         height: 100%;
         background: #3a3228;
         color: #fdf5e6;
+        padding: 0;
+    }
+
+    #output > ListItem {
+        height: auto;
+        min-height: 1;
+        padding: 0 1;
+        margin: 0;
+    }
+
+    /* Hide highlight visuals for message items to appear unselectable */
+    #output > ListItem.msg-item.-highlight {
+        background: transparent;
+        color: #fdf5e6;
+    }
+    #output:focus > ListItem.msg-item.-highlight {
+        background: transparent;
+        color: #fdf5e6;
+    }
+
+    #output > ListItem > Vertical {
+        height: auto;
+        padding: 0;
+        margin: 0;
+        content-align: left top;
+    }
+
+    #output > ListItem Static {
+        height: auto;
+        padding: 0;
+        margin: 0;
     }
     
     #stats_bar {
@@ -784,6 +878,13 @@ class TricodeCLI(App):
         self.spinner_index = 0
         self.dots_count = 1
         self.animation_timer = None
+        self._token_last_update_ts: float = 0.0
+        self._token_pending: Optional[Tuple[int, int, int]] = None
+        self.history_window_size: int = int(os.getenv("TRICODE_TUI_WINDOW", "60"))
+        self.history_render_from: int = 0
+        # visible window tuning for auto-render
+        self.render_above = int(os.getenv("TRICODE_TUI_VIS_ABOVE", "10"))
+        self.render_below = int(os.getenv("TRICODE_TUI_VIS_BELOW", "30"))
         
         set_work_dir(work_dir, bypass_work_dir_limit)
         
@@ -853,7 +954,7 @@ class TricodeCLI(App):
         yield Header()
         
         with Vertical(id="output_container"):
-            yield RichLog(id="output", wrap=True, highlight=True, markup=True)
+            yield ListView(id="output")
         
         with Horizontal(id="stats_bar"):
             yield Static("", id="loading_status")
@@ -865,12 +966,11 @@ class TricodeCLI(App):
         yield Footer()
     
     def on_mount(self) -> None:
-        output = self.query_one("#output", RichLog)
-        output.write(f"[bold #ff8c00]Tricode TUI Mode[/bold #ff8c00]")
-        output.write(f"Session ID: {self.session_id}")
-        output.write(f"[dim]Press Enter to send, backslash+Enter for newline[/dim]")
-        output.write("")
-        self.query_one("#input", CustomTextArea).focus()    
+        lst = self.query_one("#output", ListView)
+        self._append_info_line("[bold #ff8c00]Tricode TUI Mode[/bold #ff8c00]")
+        self._append_info_line(f"Session ID: {self.session_id}")
+        self._append_info_line("[dim]Press Enter to send, backslash+Enter for newline[/dim]")
+        self.query_one("#input", CustomTextArea).focus()
     def _ask_permission_async(self, tool_name: str, arguments: dict) -> Tuple[bool, bool, str]:
         import threading
         result_holder = {'result': None}
@@ -917,9 +1017,211 @@ class TricodeCLI(App):
         loading_widget.update("")
         self.spinner_index = 0
         self.dots_count = 1
-    
+
     async def on_custom_text_area_submitted(self, event: CustomTextArea.Submitted) -> None:
         await self._send_message()
+
+    # Output helpers
+    def _output_view(self) -> ListView:
+        return self.query_one("#output", ListView)
+
+    def _scroll_to_end(self) -> None:
+        lst = self._output_view()
+        try:
+            if hasattr(lst, "action_scroll_end"):
+                lst.action_scroll_end()
+            else:
+                lst.index = max(0, len(lst.children) - 1)
+        except Exception:
+            pass
+
+    def _append_item(self, item: ListItem) -> None:
+        lst = self._output_view()
+        try:
+            lst.append(item)
+        except Exception:
+            lst.mount(item)
+        self._scroll_to_end()
+        self._update_render_window()
+
+    def _append_info_line(self, markup_text: str) -> None:
+        self._append_item(ListItem(Static(Text.from_markup(markup_text))))
+
+    def _append_user_message(self, content: str) -> None:
+        body = CollapsibleStatic(content, markdown=True, collapsed=True)
+        self._append_item(MessageItem("You:", "[bold #ffa500]", body))
+
+    def _append_agent_message(self, content: str) -> None:
+        body = CollapsibleStatic(content, markdown=True, collapsed=True)
+        self._append_item(MessageItem("Agent:", "[bold #ff8c00]", body))
+
+    def _append_tool_call(self, formatted: str) -> None:
+        text = Text.from_markup(f"[#2b2420 on #ffb347] {rich_escape(str(formatted))} [/]")
+        self._append_item(ListItem(Static(text)))
+
+    def _append_tool_result_generic(self, formatted: str, success: bool) -> None:
+        safe = rich_escape(str(formatted))
+        if success:
+            self._append_item(ListItem(Static(Text.from_markup(f"[#fdf5e6]↳ {safe}[/#fdf5e6]"))))
+        else:
+            self._append_item(ListItem(Static(Text.from_markup(f"[red]↳ {safe}[/red]"))))
+
+    def _append_tool_result(self, name: str, success: bool, result: str, formatted: str, func_args: dict) -> None:
+        if name == "plan":
+            if success:
+                self._append_item(ListItem(Static(Text.from_ansi(formatted))))
+            else:
+                self._append_item(ListItem(Static(Text.from_markup(f"[red]{rich_escape(str(formatted))}[/red]"))))
+            return
+        if name == "edit_file":
+            diff_text = ""
+            try:
+                data = json.loads(result)
+                diff_text = data.get("diff", "")
+            except Exception:
+                diff_text = ""
+            if diff_text:
+                self._append_item(ListItem(Static(render_diff_rich(diff_text))))
+                return
+        self._append_tool_result_generic(formatted, success)
+
+    def _clear_output(self) -> None:
+        lst = self._output_view()
+        for child in list(lst.children):
+            try:
+                child.remove()
+            except Exception:
+                pass
+
+    def _token_update_throttled(self, input_tokens: int, output_tokens: int, total_tokens: int) -> None:
+        now = time.time()
+        self._token_pending = (input_tokens, output_tokens, total_tokens)
+        if now - self._token_last_update_ts >= 0.2:
+            self._token_last_update_ts = now
+            it, ot, tt = self._token_pending
+            token_stats = self.query_one("#token_stats", Static)
+            token_stats.update(f"↑ {it} tokens  ↓ {ot} tokens  total: {tt} tokens")
+
+    def _rebuild_from_messages(self, start_index: int) -> None:
+        self.history_render_from = max(0, start_index)
+        self._clear_output()
+        if self.history_render_from > 0:
+            self._append_item(LoadMoreItem())
+        pending_tool_calls = {}
+        pending_assistant_content = None
+        for msg in self.session.messages[self.history_render_from:]:
+            role = msg.get("role")
+            content = msg.get("content")
+            if role == "system":
+                continue
+            if role == "user":
+                self._append_user_message(content or "")
+                continue
+            if role == "assistant":
+                tool_calls = msg.get("tool_calls")
+                if tool_calls:
+                    pending_tool_calls = {}
+                    for tc in tool_calls:
+                        func_name = tc.get("function", {}).get("name", "unknown")
+                        try:
+                            func_args = json.loads(tc.get("function", {}).get("arguments", "{}"))
+                        except json.JSONDecodeError:
+                            func_args = {}
+                        formatted_call = format_tool_call(func_name, func_args)
+                        self._append_tool_call(formatted_call)
+                        if tc.get("id"):
+                            pending_tool_calls[tc.get("id")] = (func_name, func_args)
+                    pending_assistant_content = content or None
+                else:
+                    if content:
+                        self._append_agent_message(content)
+                continue
+            if role == "tool":
+                call_id = msg.get("tool_call_id")
+                func_info = pending_tool_calls.get(call_id)
+                func_name, func_args = (func_info if isinstance(func_info, tuple) else (func_info, {})) if func_info else (None, {})
+                if func_name == "edit_file":
+                    try:
+                        data = json.loads(content)
+                        diff_text = data.get("diff", "")
+                    except Exception:
+                        diff_text = ""
+                    if diff_text:
+                        self._append_item(ListItem(Static(render_diff_rich(diff_text))))
+                    else:
+                        formatted = format_tool_result("edit_file", True, content, func_args)
+                        self._append_item(ListItem(Static(Text.from_markup(f"[#fdf5e6]↳ {rich_escape(str(formatted))}[/#fdf5e6]"))))
+                else:
+                    if func_name == "plan":
+                        formatted = format_tool_result("plan", True, content, func_args)
+                        self._append_item(ListItem(Static(Text.from_ansi(formatted))))
+                    else:
+                        formatted = format_tool_result(func_name or "unknown", True, content, func_args)
+                        self._append_item(ListItem(Static(Text.from_markup(f"[#fdf5e6]↳ {rich_escape(str(formatted))}[/#fdf5e6]"))))
+                if call_id in pending_tool_calls:
+                    pending_tool_calls.pop(call_id, None)
+                if not pending_tool_calls and pending_assistant_content:
+                    self._append_agent_message(pending_assistant_content)
+                    pending_assistant_content = None
+        self._append_info_line("[dim]--- History loaded ---[/dim]")
+        self.query_one("#input", CustomTextArea).focus()
+        self._update_render_window()
+
+    def action_load_more_history(self) -> None:
+        new_start = max(0, self.history_render_from - self.history_window_size)
+        self._rebuild_from_messages(new_start)
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        try:
+            if event.list_view.id != "output":
+                return
+        except Exception:
+            return
+        idx = event.list_view.index
+        try:
+            item = event.list_view.children[idx]
+        except Exception:
+            return
+        if isinstance(item, LoadMoreItem):
+            self.action_load_more_history()
+            return
+
+    def _update_render_window(self, center_index: Optional[int] = None) -> None:
+        lst = self._output_view()
+        try:
+            count = len(lst.children)
+        except Exception:
+            return
+        if count == 0:
+            return
+        if center_index is None:
+            try:
+                center_index = lst.index
+            except Exception:
+                center_index = None
+        # Fallback if no highlighted index available
+        if center_index is None or not isinstance(center_index, int):
+            center_index = count - 1
+        # Clamp within valid range
+        if center_index < 0:
+            center_index = 0
+        if center_index > count - 1:
+            center_index = count - 1
+        above = getattr(self, "render_above", 10)
+        below = getattr(self, "render_below", 30)
+        start = max(0, center_index - above)
+        end = min(count - 1, center_index + below)
+        for i, child in enumerate(lst.children):
+            if isinstance(child, MessageItem) and isinstance(child.body, CollapsibleStatic):
+                child.body.set_collapsed(not (start <= i <= end))
+
+    def on_list_view_highlighted(self, event: "ListView.Highlighted") -> None:
+        try:
+            if event.list_view.id != "output":
+                return
+        except Exception:
+            return
+        self._update_render_window(event.list_view.index)
     
     def on_custom_text_area_checkpoint_requested(self, event: CustomTextArea.CheckpointRequested) -> None:
         checkpoints = []
@@ -960,82 +1262,11 @@ class TricodeCLI(App):
                     self.session.output_tokens = hist_output
                     self.session.total_tokens = hist_total
                     
-                    output = self.query_one("#output", RichLog)
-                    output.clear()
-                    output.write(f"[bold #ff8c00]Rolled back before checkpoint #{selected_index + 1}[/bold #ff8c00]")
-                    output.write(f"[dim]Message restored to input box for editing[/dim]")
-                    output.write(f"Session ID: {self.session_id}")
-                    output.write("")
-                    
-                    pending_tool_calls = {}
-                    pending_assistant_content = None
-                    for msg in self.session.messages:
-                        role = msg.get("role")
-                        content = msg.get("content")
-                        
-                        if role == "system":
-                            continue
-                        elif role == "user":
-                            output.write(f"[bold #ffa500]You:[/bold #ffa500] {content}")
-                            output.write("")
-                        elif role == "assistant":
-                            tool_calls = msg.get("tool_calls")
-                            if tool_calls:
-                                pending_tool_calls = {}
-                                for tc in tool_calls:
-                                    func_name = tc.get("function", {}).get("name", "unknown")
-                                    try:
-                                        func_args = json.loads(tc.get("function", {}).get("arguments", "{}"))
-                                    except json.JSONDecodeError:
-                                        func_args = {}
-                                    formatted_call = format_tool_call(func_name, func_args)
-                                    output.write(f"[#2b2420 on #ffb347] {formatted_call} [/]")
-                                    if tc.get("id"):
-                                        pending_tool_calls[tc.get("id")] = (func_name, func_args)
-                                # Defer assistant content until after related tool outputs
-                                pending_assistant_content = content or None
-                            else:
-                                if content:
-                                    output.write("[bold #ff8c00]Agent:[/bold #ff8c00]")
-                                    md = Markdown(content)
-                                    output.write(md)
-                                    output.write("")
-                        elif role == "tool":
-                            call_id = msg.get("tool_call_id")
-                            func_info = pending_tool_calls.get(call_id)
-                            func_name, func_args = (func_info if isinstance(func_info, tuple) else (func_info, {})) if func_info else (None, {})
-                            if func_name == "edit_file":
-                                try:
-                                    data = json.loads(content)
-                                    diff_text = data.get("diff", "")
-                                except Exception:
-                                    diff_text = ""
-                                if diff_text:
-                                    output.write(render_diff_rich(diff_text))
-                                else:
-                                    formatted = format_tool_result("edit_file", True, content, func_args)
-                                    output.write(f"[#fdf5e6]↳ {formatted}[/#fdf5e6]")
-                            else:
-                                if func_name == "plan":
-                                    formatted = format_tool_result("plan", True, content, func_args)
-                                    output.write(Text.from_ansi(formatted))
-                                else:
-                                    formatted = format_tool_result(func_name or "unknown", True, content, func_args)
-                                    output.write(f"[#fdf5e6]↳ {formatted}[/#fdf5e6]")
-                            output.write("")
-                            # After consuming this tool output, remove it
-                            if call_id in pending_tool_calls:
-                                pending_tool_calls.pop(call_id, None)
-                            # If all pending tools done, flush deferred assistant content
-                            if not pending_tool_calls and pending_assistant_content:
-                                output.write("[bold #ff8c00]Agent:[/bold #ff8c00]")
-                                md = Markdown(pending_assistant_content)
-                                output.write(md)
-                                output.write("")
-                                pending_assistant_content = None
-                    
-                    output.write(f"[dim]--- Rolled back, {len(self.session.messages)} messages remaining ---[/dim]")
-                    output.write("")
+                    start_idx = max(0, len(self.session.messages) - self.history_window_size)
+                    self._rebuild_from_messages(start_idx)
+                    self._append_info_line(f"[bold #ff8c00]Rolled back before checkpoint #{selected_index + 1}[/bold #ff8c00]")
+                    self._append_info_line("[dim]Message restored to input box for editing[/dim]")
+                    self._append_info_line(f"Session ID: {self.session_id}")
                     
                     token_stats = self.query_one("#token_stats", Static)
                     token_text = f"↑ {hist_input} tokens  ↓ {hist_output} tokens  total: {hist_total} tokens"
@@ -1059,16 +1290,12 @@ class TricodeCLI(App):
         self.history_index = -1
         
         input_widget.clear()
-        output = self.query_one("#output", RichLog)
-        
-        output.write(f"[bold #ffa500]You:[/bold #ffa500] {message}")
-        output.write("")
+        self._append_user_message(message)
         
         self._start_loading()
         self.run_worker(self._process_response(message), exclusive=False)
     
     async def _process_response(self, message: str) -> None:
-        output = self.query_one("#output", RichLog)
         token_stats = self.query_one("#token_stats", Static)
         
         def display_event(event):
@@ -1076,63 +1303,22 @@ class TricodeCLI(App):
                 pass
             
             elif event["type"] == "token_update":
-                token_text = f"↑ {event['input_tokens']} tokens  ↓ {event['output_tokens']} tokens  total: {event['total_tokens']} tokens"
-                self.call_from_thread(lambda: token_stats.update(token_text))
+                self.call_from_thread(lambda e=event: self._token_update_throttled(e['input_tokens'], e['output_tokens'], e['total_tokens']))
             
             elif event["type"] == "tool_call":
-                self.call_from_thread(lambda e=event: output.write(f"[#2b2420 on #ffb347] {e['formatted']} [/]"))
+                self.call_from_thread(lambda e=event: self._append_tool_call(e['formatted']))
             
             elif event["type"] == "tool_result":
-                if event.get("name") == "plan":
-                    def write_plan_result(formatted):
-                        plan_text = Text.from_ansi(formatted)
-                        output.write(plan_text)
-                    if event["success"]:
-                        self.call_from_thread(lambda e=event: write_plan_result(e['formatted']))
-                    else:
-                        self.call_from_thread(lambda e=event: output.write(f"[red]{e['formatted']}[/red]"))
-                elif event.get("name") == "edit_file":
-                    def write_edit_result(raw_result: str, formatted: str, success: bool):
-                        if not success:
-                            output.write(f"[red]↳ {formatted}[/red]")
-                            return
-                        # Try to parse result JSON to get raw diff
-                        try:
-                            data = json.loads(raw_result)
-                            diff_text = data.get("diff", "")
-                        except Exception:
-                            diff_text = ""
-                        if diff_text:
-                            output.write(render_diff_rich(diff_text))
-                        else:
-                            # Fallback to ANSI parsing if diff missing
-                            edit_text = Text.from_ansi(formatted)
-                            output.write("↳ ")
-                            output.write(edit_text)
-
-                    self.call_from_thread(lambda e=event: write_edit_result(e['result'], e['formatted'], e['success']))
-                else:
-                    if event["success"]:
-                        self.call_from_thread(lambda e=event: output.write(f"[#fdf5e6]↳ {e['formatted']}[/#fdf5e6]"))
-                    else:
-                        self.call_from_thread(lambda e=event: output.write(f"[red]↳ {e['formatted']}[/red]"))
-                self.call_from_thread(lambda: output.write(""))
+                self.call_from_thread(lambda e=event: self._append_tool_result(e.get('name'), e['success'], e['result'], e['formatted'], e.get('args', {})))
             
             elif event["type"] == "assistant_message":
-                def write_markdown(content):
-                    output.write("[bold #ff8c00]Agent:[/bold #ff8c00]")
-                    md = Markdown(content)
-                    output.write(md)
-                    output.write("")
-                self.call_from_thread(lambda e=event: write_markdown(e['content']))
+                self.call_from_thread(lambda e=event: self._append_agent_message(e['content']))
             
             elif event["type"] == "error":
-                self.call_from_thread(lambda e=event: output.write(f"[bold red]Error:[/bold red] {e['content']}"))
-                self.call_from_thread(lambda: output.write(""))
+                self.call_from_thread(lambda e=event: self._append_info_line("[bold red]Error:[/bold red] " + rich_escape(str(e['content']))))
             
             elif event["type"] == "cancelled":
-                self.call_from_thread(lambda: output.write("[bold yellow]Request cancelled by user[/bold yellow]"))
-                self.call_from_thread(lambda: output.write(""))
+                self.call_from_thread(lambda: self._append_info_line("[bold yellow]Request cancelled by user[/bold yellow]"))
         
         def process_in_thread():
             try:
@@ -1152,8 +1338,7 @@ class TricodeCLI(App):
     def action_cancel_request(self) -> None:
         if self.agent_running:
             self.cancel_requested = True
-            output = self.query_one("#output", RichLog)
-            output.write("[bold yellow]Cancelling request...[/bold yellow]")
+            self._append_info_line("[bold yellow]Cancelling request...[/bold yellow]")
     
     def action_quit(self) -> None:
         self.exit()
@@ -1174,12 +1359,10 @@ class TricodeCLI(App):
         self.message_history = []
         self.history_index = -1
         
-        output = self.query_one("#output", RichLog)
-        output.clear()
-        output.write(f"[bold #ff8c00]New Session Created[/bold #ff8c00]")
-        output.write(f"Session ID: {self.session_id}")
-        output.write(f"[dim]Press Enter to send, backslash+Enter for newline[/dim]")
-        output.write("")
+        self._clear_output()
+        self._append_info_line("[bold #ff8c00]New Session Created[/bold #ff8c00]")
+        self._append_info_line(f"Session ID: {self.session_id}")
+        self._append_info_line("[dim]Press Enter to send, backslash+Enter for newline[/dim]")
         
         token_stats = self.query_one("#token_stats", Static)
         token_stats.update("↑ 0 tokens  ↓ 0 tokens  total: 0 tokens")
@@ -1189,8 +1372,7 @@ class TricodeCLI(App):
     def action_resume_session(self) -> None:
         sessions = get_available_sessions()
         if not sessions:
-            output = self.query_one("#output", RichLog)
-            output.write("[bold red]No sessions available to resume[/bold red]")
+            self._append_info_line("[bold red]No sessions available to resume[/bold red]")
             return
         
         def handle_session_selection(selected_session_id: str | None) -> None:
@@ -1219,79 +1401,11 @@ class TricodeCLI(App):
                     self.message_history = [msg.get("content") for msg in messages if msg.get("role") == "user"]
                     self.history_index = -1
                     
-                    output = self.query_one("#output", RichLog)
-                    output.clear()
-                    output.write(f"[bold #ff8c00]Session Resumed[/bold #ff8c00]")
-                    output.write(f"Session ID: {self.session_id}")
-                    output.write(f"[dim]Press Enter to send, backslash+Enter for newline[/dim]")
-                    output.write("")
-                    
-                    pending_tool_calls = {}
-                    pending_assistant_content = None
-                    for msg in messages:
-                        role = msg.get("role")
-                        content = msg.get("content")
-                        
-                        if role == "system":
-                            continue
-                        elif role == "user":
-                            output.write(f"[bold #ffa500]You:[/bold #ffa500] {content}")
-                            output.write("")
-                        elif role == "assistant":
-                            tool_calls = msg.get("tool_calls")
-                            if tool_calls:
-                                pending_tool_calls = {}
-                                for tc in tool_calls:
-                                    func_name = tc.get("function", {}).get("name", "unknown")
-                                    try:
-                                        func_args = json.loads(tc.get("function", {}).get("arguments", "{}"))
-                                    except json.JSONDecodeError:
-                                        func_args = {}
-                                    formatted_call = format_tool_call(func_name, func_args)
-                                    output.write(f"[#2b2420 on #ffb347] {formatted_call} [/]")
-                                    if tc.get("id"):
-                                        pending_tool_calls[tc.get("id")] = (func_name, func_args)
-                                pending_assistant_content = content or None
-                            else:
-                                if content:
-                                    output.write("[bold #ff8c00]Agent:[/bold #ff8c00]")
-                                    md = Markdown(content)
-                                    output.write(md)
-                                    output.write("")
-                        elif role == "tool":
-                            call_id = msg.get("tool_call_id")
-                            func_info = pending_tool_calls.get(call_id)
-                            func_name, func_args = (func_info if isinstance(func_info, tuple) else (func_info, {})) if func_info else (None, {})
-                            if func_name == "edit_file":
-                                try:
-                                    data = json.loads(content)
-                                    diff_text = data.get("diff", "")
-                                except Exception:
-                                    diff_text = ""
-                                if diff_text:
-                                    output.write(render_diff_rich(diff_text))
-                                else:
-                                    formatted = format_tool_result("edit_file", True, content, func_args)
-                                    output.write(f"[#fdf5e6]↳ {formatted}[/#fdf5e6]")
-                            else:
-                                if func_name == "plan":
-                                    formatted = format_tool_result("plan", True, content, func_args)
-                                    output.write(Text.from_ansi(formatted))
-                                else:
-                                    formatted = format_tool_result(func_name or "unknown", True, content, func_args)
-                                    output.write(f"[#fdf5e6]↳ {formatted}[/#fdf5e6]")
-                            output.write("")
-                            if call_id in pending_tool_calls:
-                                pending_tool_calls.pop(call_id, None)
-                            if not pending_tool_calls and pending_assistant_content:
-                                output.write("[bold #ff8c00]Agent:[/bold #ff8c00]")
-                                md = Markdown(pending_assistant_content)
-                                output.write(md)
-                                output.write("")
-                                pending_assistant_content = None
-                    
-                    output.write(f"[dim]--- History loaded ---[/dim]")
-                    output.write("")
+                    start_idx = max(0, len(messages) - self.history_window_size)
+                    self._rebuild_from_messages(start_idx)
+                    self._append_info_line("[bold #ff8c00]Session Resumed[/bold #ff8c00]")
+                    self._append_info_line(f"Session ID: {self.session_id}")
+                    self._append_info_line("[dim]Press Enter to send, backslash+Enter for newline[/dim]")
                     
                     token_stats = self.query_one("#token_stats", Static)
                     token_text = f"↑ {hist_input} tokens  ↓ {hist_output} tokens  total: {hist_total} tokens"
@@ -1299,18 +1413,15 @@ class TricodeCLI(App):
                     
                     self.query_one("#input", CustomTextArea).focus()
                 except Exception as e:
-                    output = self.query_one("#output", RichLog)
-                    output.write(f"[bold red]Failed to resume session: {str(e)}[/bold red]")
+                    self._append_info_line("[bold red]Failed to resume session: " + rich_escape(str(e)) + "[/bold red]")
         
         self.push_screen(SessionListScreen(sessions), handle_session_selection)
     
     async def action_clear_output(self) -> None:
-        output = self.query_one("#output", RichLog)
-        output.clear()
-        output.write(f"[bold #ff8c00]Output Cleared[/bold #ff8c00]")
-        output.write(f"Session ID: {self.session_id}")
-        output.write(f"[dim]Press Enter to send, backslash+Enter for newline[/dim]")
-        output.write("")
+        self._clear_output()
+        self._append_info_line("[bold #ff8c00]Output Cleared[/bold #ff8c00]")
+        self._append_info_line(f"Session ID: {self.session_id}")
+        self._append_info_line("[dim]Press Enter to send, backslash+Enter for newline[/dim]")
 
 
 def run_tui(work_dir: str = None, bypass_work_dir_limit: bool = False, bypass_permission: bool = False, allowed_tools: list = None, 

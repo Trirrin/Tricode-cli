@@ -81,7 +81,7 @@ jobs:
         with:
           name: tricode-${{ matrix.asset_suffix }}
           path: |
-            release\\tricode-${{ matrix.asset_suffix }}.exe
+            release/tricode-${{ matrix.asset_suffix }}.exe
 
       - name: Upload artifact (Unix)
         if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
@@ -91,9 +91,16 @@ jobs:
           path: |
             release/tricode-${{ matrix.asset_suffix }}
           
-      - name: Upload to release
-        if: github.event_name == 'release'
+      - name: Upload to release (Windows)
+        if: github.event_name == 'release' && startsWith(matrix.os, 'windows')
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload ${{ github.event.release.tag_name }} release/tricode-${{ matrix.asset_suffix }}* --clobber
+          gh release upload ${{ github.event.release.tag_name }} release/tricode-${{ matrix.asset_suffix }}.exe --clobber
+
+      - name: Upload to release (Unix)
+        if: github.event_name == 'release' && (startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos'))
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ github.event.release.tag_name }} release/tricode-${{ matrix.asset_suffix }} --clobber

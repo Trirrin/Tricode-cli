@@ -10,13 +10,16 @@ tiktoken_hidden = collect_submodules('tiktoken')
 tiktoken_ext_datas = collect_data_files('tiktoken_ext')
 tiktoken_ext_hidden = collect_submodules('tiktoken_ext')
 
+# ddgs dynamically imports engine modules; ensure they are bundled
+ddgs_hidden = collect_submodules('ddgs')
+
 
 a = Analysis(
     ['tricode.py'],
     pathex=[],
     binaries=[],
     datas=tiktoken_datas + tiktoken_ext_datas,
-    hiddenimports=tiktoken_hidden + tiktoken_ext_hidden + ['tiktoken_ext.openai_public'],
+    hiddenimports=tiktoken_hidden + tiktoken_ext_hidden + ddgs_hidden + ['tiktoken_ext.openai_public'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

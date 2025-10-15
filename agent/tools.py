@@ -1587,6 +1587,40 @@ def fetch_url(url: str, timeout: int = 10) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Failed to fetch URL: {str(e)}"
 
+def _web_search_html_fallback(query: str, max_results: int = 5) -> Tuple[bool, str]:
+    """Fallback DuckDuckGo HTML scraping when API lib misbehaves in bundled builds.
+
+    Uses the lightweight HTML endpoint and extracts title, url and snippet.
+    """
+    try:
+        url = "https://html.duckduckgo.com/html/"
+        params = {"q": query}
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; TriCode/1.0)"}
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        resp.raise_for_status()
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        results = []
+        for res in soup.select(".result"):
+            a = res.select_one("a.result__a")
+            if not a:
+                continue
+            title = a.get_text(strip=True) or "No title"
+            href = a.get("href", "No URL")
+            snip_el = res.select_one(".result__snippet")
+            snippet = snip_el.get_text(" ", strip=True) if snip_el else "No description"
+            results.append((title, href, snippet))
+            if len(results) >= max_results:
+                break
+
+        if not results:
+            return True, "No results found"
+        formatted = [f"[{i}] {t}\n    URL: {u}\n    {s}\n" for i, (t, u, s) in enumerate(results, 1)]
+        return True, "\n".join(formatted)
+    except Exception as e:
+        return False, f"Search failed: {str(e)}"
+
+
 def web_search(query: str, max_results: int = 5) -> Tuple[bool, str]:
     global LAST_WEB_SEARCH_TIME
     
@@ -1617,9 +1651,17 @@ def web_search(query: str, max_results: int = 5) -> Tuple[bool, str]:
             for i, result in enumerate(results, 1):
                 title = result.get('title', 'No title')
                 url = result.get('href', 'No URL')
-                snippet = result.get('body', 'No description')
+                # ddgs/duckduckgo_search have changed keys across versions
+                snippet = (
+                    result.get('body') or
+                    result.get('text') or
+                    result.get('snippet') or
+                    result.get('description') or
+                    result.get('content') or
+                    'No description'
+                )
                 formatted.append(f"[{i}] {title}\n    URL: {url}\n    {snippet}\n")
-            
+
             return True, "\n".join(formatted)
             
         except Exception as e:
@@ -1637,6 +1679,13 @@ def web_search(query: str, max_results: int = 5) -> Tuple[bool, str]:
                         "Please wait a few minutes before searching again."
                     )
             else:
+                # ddgs has thrown odd KeyError('text') in some bundled builds.
+                # Attempt a single HTML fallback on the first failure.
+                if attempt == 0:
+                    ok, res = _web_search_html_fallback(query, max_results)
+                    if ok:
+                        LAST_WEB_SEARCH_TIME = time.time()
+                        return True, res
                 return False, f"Search failed: {str(e)}"
     
     return False, "Search failed: Maximum retries exceeded"

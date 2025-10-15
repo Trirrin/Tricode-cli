@@ -65,13 +65,19 @@ jobs:
       # ==== Windows ====
       - name: Build on Windows
         if: startsWith(matrix.os, 'windows')
-        shell: pwsh
+        shell: cmd
         run: |
           pip install -r requirements.txt
           pip install pyinstaller
-          build.bat auto
+          .\build.bat auto
+
+      - name: Rename Windows artifact
+        if: startsWith(matrix.os, 'windows')
+        shell: pwsh
+        run: |
           $src = "dist/tricode.exe"
           $dst = "dist/tricode-${{ matrix.asset_suffix }}.exe"
+          if (!(Test-Path $src)) { Write-Error "Source not found: $src"; exit 1 }
           if (Test-Path $dst) { Remove-Item $dst -Force }
           try {
             Move-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop

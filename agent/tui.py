@@ -332,7 +332,8 @@ class PermissionDialog(ModalScreen):
                     value_str = value_str[:100] + "..."
                 content_lines.append(f"  {key}: {value_str}")
             
-            yield Static("\n".join(content_lines), id="permission_content")
+            # Escape content to avoid Rich markup parsing errors from arbitrary text
+            yield Static(Text(rich_escape("\n".join(content_lines))), id="permission_content")
 
             # For edit_file, show a dry-run diff preview
             if self.tool_name == "edit_file":
@@ -436,7 +437,8 @@ class SessionListScreen(ModalScreen):
             with ListView():
                 for session in self.sessions:
                     label_text = f"{session['id']} | {session['time']} | {session['msg_count']} msgs | {session['total_tokens']} tokens | {session['first_prompt']}"
-                    yield ListItem(Label(label_text))
+                    # Use Text to bypass markup parsing for arbitrary session content
+                    yield ListItem(Label(Text(rich_escape(label_text))))
     
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         selected_index = event.list_view.index
@@ -501,7 +503,8 @@ class CheckpointListScreen(ModalScreen):
                 for idx, checkpoint in enumerate(self.checkpoints):
                     preview = checkpoint if len(checkpoint) <= 80 else checkpoint[:77] + "..."
                     label_text = f"#{idx + 1}: {preview}"
-                    yield ListItem(Label(label_text))
+                    # Escape arbitrary user text to prevent Rich markup errors
+                    yield ListItem(Label(Text(rich_escape(label_text))))
     
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         selected_index = event.list_view.index

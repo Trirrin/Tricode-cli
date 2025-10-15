@@ -65,12 +65,20 @@ jobs:
       # ==== Windows ====
       - name: Build on Windows
         if: startsWith(matrix.os, 'windows')
-        shell: cmd
+        shell: pwsh
         run: |
           pip install -r requirements.txt
           pip install pyinstaller
           build.bat auto
-          ren dist\tricode.exe tricode-${{ matrix.asset_suffix }}.exe
+          $src = "dist/tricode.exe"
+          $dst = "dist/tricode-${{ matrix.asset_suffix }}.exe"
+          if (Test-Path $dst) { Remove-Item $dst -Force }
+          try {
+            Move-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop
+          } catch {
+            Copy-Item -LiteralPath $src -Destination $dst -Force
+            Remove-Item -LiteralPath $src -Force
+          }
 
       - name: Upload artifact (Windows)
         if: startsWith(matrix.os, 'windows')

@@ -75,12 +75,21 @@ jobs:
           mkdir release
           copy dist\tricode.exe release\tricode-${{ matrix.asset_suffix }}.exe
 
-      - name: Upload artifact
+      - name: Upload artifact (Windows)
+        if: startsWith(matrix.os, 'windows')
         uses: actions/upload-artifact@v4
         with:
           name: tricode-${{ matrix.asset_suffix }}
           path: |
-            release/tricode-${{ matrix.asset_suffix }}*
+            release\\tricode-${{ matrix.asset_suffix }}.exe
+
+      - name: Upload artifact (Unix)
+        if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
+        uses: actions/upload-artifact@v4
+        with:
+          name: tricode-${{ matrix.asset_suffix }}
+          path: |
+            release/tricode-${{ matrix.asset_suffix }}
           
       - name: Upload to release
         if: github.event_name == 'release'

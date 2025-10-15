@@ -9,6 +9,11 @@ $REPO = "Trirrin/Tricode-cli"
 $INSTALL_DIR = "$env:LOCALAPPDATA\Tricode"
 $GITHUB_API = "https://api.github.com/repos/$REPO/releases/latest"
 
+# Try to ensure TLS1.2 for older systems
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch {}
+
 # ==== TEXTS 说明文本（EN/中）====
 $TEXT_START = "Installing Tricode-cli..."
 $TEXT_DOWNLOAD = "Downloading the latest release..."
@@ -42,37 +47,54 @@ function Write-Error-Exit {
 # ==== MAIN 主流程 ====
 Write-Info $TEXT_START
 
-# 1. Detect Architecture 检测架构
-$ARCH = $env:PROCESSOR_ARCHITECTURE
-Write-Host "Detected Architecture: $ARCH"
+# 1. Detect Architecture 检测架构（兼容 32 位 PowerShell）
+$archRaw = $env:PROCESSOR_ARCHITECTURE
+$archWow = $env:PROCESSOR_ARCHITEW6432
+$isArm64 = ($archRaw -match 'ARM64') -or ($archWow -match 'ARM64')
+$is64OS = [Environment]::Is64BitOperatingSystem
+Write-Host "Detected Architecture: raw=$archRaw, wow64=$archWow, is64OS=$is64OS"
 
-if ($ARCH -eq "AMD64" -or $ARCH -eq "x64") {
-    $ASSET_ARCH = "windows-x86_64"
-} elseif ($ARCH -eq "ARM64") {
+if ($isArm64) {
     $ASSET_ARCH = "windows-arm64"
+} elseif ($is64OS) {
+    $ASSET_ARCH = "windows-x86_64"
 } else {
-    Write-Error-Exit "Unsupported architecture: $ARCH"
+    Write-Error-Exit "Unsupported architecture or 32-bit OS is not supported."
 }
 
-Write-Host "Looking for release: tricode-$ASSET_ARCH.exe"
+Write-Host "Looking for release asset matching: $ASSET_ARCH (.exe preferred)"
 
-# 2. Get download URL from GitHub API 通过GitHub API获取下载链接
+# 2. Get download URL from GitHub API 通过 GitHub API 获取下载链接
 Write-Info $TEXT_DOWNLOAD
 
 try {
-    $API_RESPONSE = Invoke-RestMethod -Uri $GITHUB_API -ErrorAction Stop
+    $headers = @{ 'User-Agent' = 'tricode-installer' }
+    $API_RESPONSE = Invoke-RestMethod -Uri $GITHUB_API -Headers $headers -ErrorAction Stop
 } catch {
     Write-Error-Exit "Cannot connect to GitHub API. Please check your network.`nError: $_" 2
 }
 
-$ASSET_URL = $API_RESPONSE.assets | Where-Object { $_.name -like "*$ASSET_ARCH*" } | Select-Object -First 1 -ExpandProperty browser_download_url
-
-if (-not $ASSET_URL) {
-    Write-Host "Debug: Available assets:" -ForegroundColor Yellow
-    $API_RESPONSE.assets | ForEach-Object { Write-Host "  - $($_.name)" }
-    Write-Error-Exit "Cannot find matching release binary for tricode-$ASSET_ARCH.exe`nPlease check if the release exists at: https://github.com/$REPO/releases" 2
+# Prefer .exe; fallback to .zip; only match files containing the arch and with .exe/.zip suffix
+$assets = @($API_RESPONSE.assets)
+if (-not $assets -or $assets.Count -eq 0) {
+    Write-Error-Exit "No assets found in latest release." 2
 }
 
+$archPattern = [Regex]::Escape($ASSET_ARCH)
+$exeCandidates = $assets | Where-Object { $_.name -match "(?i)$archPattern.*\.exe$" }
+$zipCandidates = $assets | Where-Object { $_.name -match "(?i)$archPattern.*\.zip$" }
+
+$asset = $null
+if ($exeCandidates) { $asset = $exeCandidates | Select-Object -First 1 }
+elseif ($zipCandidates) { $asset = $zipCandidates | Select-Object -First 1 }
+
+if (-not $asset) {
+    Write-Host "Debug: Available assets:" -ForegroundColor Yellow
+    $assets | ForEach-Object { Write-Host "  - $($_.name)" }
+    Write-Error-Exit "Cannot find matching release binary for $ASSET_ARCH (.exe or .zip).`nPlease check: https://github.com/$REPO/releases" 2
+}
+
+$ASSET_URL = $asset.browser_download_url
 Write-Host "Downloading from: $ASSET_URL"
 
 # 3. Download binary 下载二进制文件
@@ -81,7 +103,7 @@ New-Item -ItemType Directory -Path $TMP_DIR -Force | Out-Null
 
 try {
     $DOWNLOAD_FILE = Join-Path $TMP_DIR (Split-Path $ASSET_URL -Leaf)
-    Invoke-WebRequest -Uri $ASSET_URL -OutFile $DOWNLOAD_FILE -ErrorAction Stop
+    Invoke-WebRequest -Uri $ASSET_URL -OutFile $DOWNLOAD_FILE -UseBasicParsing -ErrorAction Stop
 } catch {
     Write-Error-Exit "Failed to download binary.`nError: $_" 3
 }
@@ -115,24 +137,44 @@ try {
     Write-Error-Exit "Failed to copy binary to $INSTALL_DIR`nError: $_" 5
 }
 
-# 6. Add to PATH 添加到PATH
+# 6. Add to PATH 添加到 PATH（去重、规范化、无多余分号）
 Write-Info $TEXT_PATH
 
 $USER_PATH = [Environment]::GetEnvironmentVariable("Path", "User")
+$normalizedInstall = $INSTALL_DIR.TrimEnd('\\')
 
-if ($USER_PATH -notlike "*$INSTALL_DIR*") {
+$parts = @()
+if ($null -ne $USER_PATH -and $USER_PATH -ne '') {
+    $parts = $USER_PATH -split ';' | Where-Object { $_ -and $_ -ne '' }
+}
+
+$exists = $false
+foreach ($p in $parts) {
+    if ($p.Trim().TrimEnd('\\') -ieq $normalizedInstall) { $exists = $true; break }
+}
+
+if (-not $exists) {
     try {
-        $NEW_PATH = "$USER_PATH;$INSTALL_DIR"
+        $cleanParts = @()
+        foreach ($p in $parts) {
+            $pp = $p.Trim()
+            if ($pp -ne '') { $cleanParts += $pp }
+        }
+        $cleanParts += $normalizedInstall
+        $NEW_PATH = ($cleanParts) -join ';'
         [Environment]::SetEnvironmentVariable("Path", $NEW_PATH, "User")
-        Write-Host "Added $INSTALL_DIR to User PATH"
-        
-        # Update current session PATH
-        $env:Path = "$env:Path;$INSTALL_DIR"
+        Write-Host "Added $normalizedInstall to User PATH"
+
+        # Update current session PATH（若当前会话不存在则追加）
+        $sessionHas = $false
+        $sessionParts = ($env:Path -split ';')
+        foreach ($sp in $sessionParts) { if ($sp.Trim().TrimEnd('\\') -ieq $normalizedInstall) { $sessionHas = $true; break } }
+        if (-not $sessionHas) { $env:Path = "$env:Path;$normalizedInstall" }
     } catch {
-        Write-Warning "Failed to add to PATH automatically. Please add manually:`n  $INSTALL_DIR"
+        Write-Warning "Failed to add to PATH automatically. Please add manually:`n  $normalizedInstall"
     }
 } else {
-    Write-Host "$INSTALL_DIR is already in PATH"
+    Write-Host "$normalizedInstall is already in PATH"
 }
 
 # 7. Cleanup 清理
@@ -148,3 +190,4 @@ if (Test-Path "$INSTALL_DIR\tricode.exe") {
 } else {
     Write-Warning "Installation may have issues. Binary not found."
 }
+

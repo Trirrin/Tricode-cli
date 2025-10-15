@@ -42,6 +42,16 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Determine version
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "version=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev" >> "$GITHUB_OUTPUT"
+          fi
+
       # ==== Linux (native runners, no Docker) ====
       - name: Build on Linux (native)
         if: startsWith(matrix.os, 'ubuntu')
@@ -49,8 +59,8 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
           chmod +x build.sh
-          ./build.sh auto
-          mv dist/tricode dist/tricode-${{ matrix.asset_suffix }}
+          ./build.sh "${{ steps.meta.outputs.version }}"
+          mv dist/tricode dist/tricode-${{ matrix.asset_suffix }}-${{ steps.meta.outputs.version }}
 
       # ==== MacOS ====
       - name: Build on macOS
@@ -59,8 +69,8 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
           chmod +x build.sh
-          ./build.sh auto
-          mv dist/tricode dist/tricode-${{ matrix.asset_suffix }}
+          ./build.sh "${{ steps.meta.outputs.version }}"
+          mv dist/tricode dist/tricode-${{ matrix.asset_suffix }}-${{ steps.meta.outputs.version }}
 
       # ==== Windows ====
       - name: Build on Windows
@@ -69,14 +79,14 @@ jobs:
         run: |
           pip install -r requirements.txt
           pip install pyinstaller
-          .\build.bat auto
+          .\build.bat ${{ steps.meta.outputs.version }}
 
       - name: Rename Windows artifact
         if: startsWith(matrix.os, 'windows')
         shell: pwsh
         run: |
           $src = "dist/tricode.exe"
-          $dst = "dist/tricode-${{ matrix.asset_suffix }}.exe"
+          $dst = "dist/tricode-${{ matrix.asset_suffix }}-${{ steps.meta.outputs.version }}.exe"
           if (!(Test-Path $src)) { Write-Error "Source not found: $src"; exit 1 }
           if (Test-Path $dst) { Remove-Item $dst -Force }
           try {
@@ -90,28 +100,28 @@ jobs:
         if: startsWith(matrix.os, 'windows')
         uses: actions/upload-artifact@v4
         with:
-          name: tricode-${{ matrix.asset_suffix }}
+          name: tricode-${{ matrix.asset_suffix }}-${{ steps.meta.outputs.version }}
           path: |
-            dist/tricode-${{ matrix.asset_suffix }}.exe
+            dist/tricode-${{ matrix.asset_suffix }}-${{ steps.meta.outputs.version }}.exe
 
       - name: Upload artifact (Unix)
         if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
         uses: actions/upload-artifact@v4
         with:
-          name: tricode-${{ matrix.asset_suffix }}
+          name: tricode-${{ matrix.asset_suffix }}-${{ steps.meta.outputs.version }}
           path: |
-            dist/tricode-${{ matrix.asset_suffix }}
+            dist/tricode-${{ matrix.asset_suffix }}-${{ steps.meta.outputs.version }}
           
       - name: Upload to release (Windows)
         if: github.event_name == 'release' && startsWith(matrix.os, 'windows')
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload ${{ github.event.release.tag_name }} dist/tricode-${{ matrix.asset_suffix }}.exe --clobber
+          gh release upload ${{ github.event.release.tag_name }} dist/tricode-${{ matrix.asset_suffix }}-${{ steps.meta.outputs.version }}.exe --clobber
 
       - name: Upload to release (Unix)
         if: github.event_name == 'release' && (startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos'))
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload ${{ github.event.release.tag_name }} dist/tricode-${{ matrix.asset_suffix }} --clobber
+          gh release upload ${{ github.event.release.tag_name }} dist/tricode-${{ matrix.asset_suffix }}-${{ steps.meta.outputs.version }} --clobber

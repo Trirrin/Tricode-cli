@@ -50,6 +50,7 @@ jobs:
           pip install pyinstaller
           chmod +x build.sh
           ./build.sh auto
+          mv dist/tricode dist/tricode-${{ matrix.asset_suffix }}
 
       # ==== MacOS ====
       - name: Build on macOS
@@ -59,6 +60,7 @@ jobs:
           pip install pyinstaller
           chmod +x build.sh
           ./build.sh auto
+          mv dist/tricode dist/tricode-${{ matrix.asset_suffix }}
 
       # ==== Windows ====
       - name: Build on Windows
@@ -68,6 +70,7 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
           build.bat auto
+          ren dist\tricode.exe tricode-${{ matrix.asset_suffix }}.exe
 
       - name: Upload artifact (Windows)
         if: startsWith(matrix.os, 'windows')
@@ -75,7 +78,7 @@ jobs:
         with:
           name: tricode-${{ matrix.asset_suffix }}
           path: |
-            dist/tricode.exe
+            dist/tricode-${{ matrix.asset_suffix }}.exe
 
       - name: Upload artifact (Unix)
         if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
@@ -83,18 +86,18 @@ jobs:
         with:
           name: tricode-${{ matrix.asset_suffix }}
           path: |
-            dist/tricode
+            dist/tricode-${{ matrix.asset_suffix }}
           
       - name: Upload to release (Windows)
         if: github.event_name == 'release' && startsWith(matrix.os, 'windows')
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload ${{ github.event.release.tag_name }} dist/tricode.exe#tricode-${{ matrix.asset_suffix }}.exe --clobber
+          gh release upload ${{ github.event.release.tag_name }} dist/tricode-${{ matrix.asset_suffix }}.exe --clobber
 
       - name: Upload to release (Unix)
         if: github.event_name == 'release' && (startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos'))
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload ${{ github.event.release.tag_name }} dist/tricode#tricode-${{ matrix.asset_suffix }} --clobber
+          gh release upload ${{ github.event.release.tag_name }} dist/tricode-${{ matrix.asset_suffix }} --clobber

@@ -25,6 +25,24 @@ irm https://raw.githubusercontent.com/Trirrin/Tricode-cli/main/install_tricode.p
 tricode --help
 ```
 
+### 卸载
+
+一键卸载：
+
+- Linux/macOS：
+```bash
+curl -sSL https://raw.githubusercontent.com/Trirrin/Tricode-cli/main/uninstall_tricode.sh | bash
+```
+
+- Windows（PowerShell）：
+```powershell
+irm https://raw.githubusercontent.com/Trirrin/Tricode-cli/main/uninstall_tricode.ps1 | iex
+```
+
+手动卸载：
+- Linux/macOS：删除 `~/.local/bin/tricode`（或你放置二进制的位置），并从 PATH 中移除你手动添加的目录。
+- Windows：删除 `%LOCALAPPDATA%\Tricode\tricode.exe`，必要时在“环境变量”中从用户 PATH 移除 `%LOCALAPPDATA%\Tricode`。
+
 ### 支持的平台
 
 - **Linux**: x86_64, ARM64
@@ -94,7 +112,7 @@ nano ~/.tricode/settings.json
 
 配置保存在 `~/.tricode/settings.json`。
 
-首次运行时，默认配置文件会生成在 `~/.tricode/settings.json`。你可以通过以下命令编辑它：
+首次运行时，会在 `~/.tricode/settings.json` 生成默认配置。配置采用“提供商”结构，支持多后端（如 OpenAI、Anthropic）：
 
 ```bash
 nano ~/.tricode/settings.json
@@ -102,31 +120,58 @@ nano ~/.tricode/settings.json
 
 ```json
 {
-  "openai_api_key": "sk-your-api-key-here",
-  "openai_base_url": "https://api.openai.com/v1",
-  "openai_model": "gpt-4o-mini"
+  "default_provider": "openai",
+  "providers": {
+    "openai": {
+      "api_key": "sk-your-api-key-here",
+      "base_url": "https://api.openai.com/v1",
+      "provider": "openai",
+      "model": "gpt-4o-mini"
+    },
+    "anthropic": {
+      "api_key": "",
+      "base_url": "https://api.anthropic.com/v1",
+      "provider": "anthropic",
+      "model": "claude-3-5-sonnet-20241022"
+    }
+  }
 }
 ```
 
 ### 配置选项
 
-- `openai_api_key`：你的 OpenAI API 密钥（必填）
-- `openai_base_url`：自定义 API 端点（可选，默认为 OpenAI 官方 API）
-- `openai_model`：所使用的模型（可选，默认为 gpt-4o-mini）
+- `default_provider`：默认使用的提供商（如 `openai`、`anthropic`）
+- `providers.openai.api_key`：OpenAI 的 API 密钥（使用 OpenAI 时必填）
+- `providers.openai.base_url`：API 基地址（可选）
+- `providers.openai.model`：模型名称（默认 `gpt-4o-mini`）
+- `providers.anthropic.api_key`：Anthropic 的 API 密钥（使用 Anthropic 时必填）
+- `providers.anthropic.base_url`：API 基地址（可选）
+- `providers.anthropic.model`：模型名称（如 `claude-3-5-sonnet-20241022`）
 
 ### 环境变量覆盖
 
 所有配置项都可以通过环境变量覆盖，环境变量优先级高于 `settings.json`。
 
-环境变量命名规则：`TRICODE_` + 大写配置项名
+支持两级覆盖：
 
+1）全局顶层（较少使用）：`TRICODE_` + 顶层键大写
+
+2）按提供商（推荐）：`TRICODE_{PROVIDER}_{KEY}`
+
+示例：
 ```bash
+# OpenAI
 export TRICODE_OPENAI_API_KEY="sk-your-api-key"
 export TRICODE_OPENAI_BASE_URL="https://api.openai.com/v1"
-export TRICODE_OPENAI_MODEL="gpt-4o"
+export TRICODE_OPENAI_MODEL="gpt-4o-mini"
+
+# Anthropic
+export TRICODE_ANTHROPIC_API_KEY="ak-your-api-key"
+export TRICODE_ANTHROPIC_BASE_URL="https://api.anthropic.com/v1"
+export TRICODE_ANTHROPIC_MODEL="claude-3-5-sonnet-20241022"
 ```
 
-优先级：**环境变量 > settings.json > 默认值**
+优先级：环境变量 > settings.json > 默认值
 
 ## 使用方法
 
@@ -157,6 +202,9 @@ export TRICODE_OPENAI_MODEL="gpt-4o"
 # 使用受限工具启动 TUI
 ./tricode.py --tui --tools "read_file,search_context"
 
+# 指定本次使用的提供商
+./tricode.py --tui --provider anthropic
+
 # 在 TUI 模式下恢复会话
 ./tricode.py --tui --resume abc123
 ```
@@ -185,6 +233,7 @@ export TRICODE_OPENAI_MODEL="gpt-4o"
     - 代码生成：`--tools "read_file,create_file,edit_file"`
     - 命令执行：`--tools "run_command,read_file"`
 - `--override-system-prompt`：用 AGENTS.md 内容替换默认系统提示词
+- `--provider <NAME>`：选择本次运行的提供商（覆盖 `default_provider`）
 - `-r, --resume <SESSION_ID>`：恢复之前的对话会话
 - `-l, --list-conversations`：列出所有可用的对话会话
 

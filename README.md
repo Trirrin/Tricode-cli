@@ -25,6 +25,24 @@ After installation, restart your terminal and run:
 tricode --help
 ```
 
+### Uninstall
+
+Quick uninstall:
+
+- Linux/macOS:
+```bash
+curl -sSL https://raw.githubusercontent.com/Trirrin/Tricode-cli/main/uninstall_tricode.sh | bash
+```
+
+- Windows (PowerShell):
+```powershell
+irm https://raw.githubusercontent.com/Trirrin/Tricode-cli/main/uninstall_tricode.ps1 | iex
+```
+
+Manual removal:
+- Linux/macOS: delete `~/.local/bin/tricode` (or wherever you put it) and remove any custom PATH entry you added.
+- Windows: delete `%LOCALAPPDATA%\Tricode\tricode.exe` and remove `%LOCALAPPDATA%\Tricode` from your User PATH via Environment Variables if still present.
+
 ### Update
 
 Keep your `tricode` up to date with the latest release:
@@ -108,7 +126,7 @@ nano ~/.tricode/settings.json
 
 Configuration is stored in `~/.tricode/settings.json`.
 
-On first run, a default config file will be created at `~/.tricode/settings.json`. Edit it to add your settings:
+On first run, a default config file will be created at `~/.tricode/settings.json`. Edit it to add your settings. The config is provider-based and supports multiple backends (e.g., OpenAI, Anthropic):
 
 ```bash
 nano ~/.tricode/settings.json
@@ -116,31 +134,58 @@ nano ~/.tricode/settings.json
 
 ```json
 {
-  "openai_api_key": "sk-your-api-key-here",
-  "openai_base_url": "https://api.openai.com/v1",
-  "openai_model": "gpt-4o-mini"
+  "default_provider": "openai",
+  "providers": {
+    "openai": {
+      "api_key": "sk-your-api-key-here",
+      "base_url": "https://api.openai.com/v1",
+      "provider": "openai",
+      "model": "gpt-4o-mini"
+    },
+    "anthropic": {
+      "api_key": "",
+      "base_url": "https://api.anthropic.com/v1",
+      "provider": "anthropic",
+      "model": "claude-3-5-sonnet-20241022"
+    }
+  }
 }
 ```
 
 ### Configuration Options
 
-- `openai_api_key`: Your OpenAI API key (required)
-- `openai_base_url`: Custom API endpoint (optional, defaults to OpenAI's official API)
-- `openai_model`: Model to use (optional, defaults to gpt-4o-mini)
+- `default_provider`: Which provider to use by default (e.g., `openai`, `anthropic`)
+- `providers.openai.api_key`: Your OpenAI API key (required for OpenAI)
+- `providers.openai.base_url`: API base URL (optional)
+- `providers.openai.model`: Model name (defaults to `gpt-4o-mini`)
+- `providers.anthropic.api_key`: Your Anthropic API key (required for Anthropic)
+- `providers.anthropic.base_url`: API base URL (optional)
+- `providers.anthropic.model`: Model name (e.g., `claude-3-5-sonnet-20241022`)
 
 ### Environment Variable Override
 
-All configuration options can be overridden via environment variables, which take precedence over `settings.json`.
+Environment variables take precedence over `settings.json`.
 
-Environment variable naming: `TRICODE_` + UPPERCASE config key
+Two levels are supported:
 
+1) Global keys (rarely needed): `TRICODE_` + UPPERCASE of top-level key
+
+2) Provider-specific keys (recommended): `TRICODE_{PROVIDER}_{KEY}`
+
+Examples:
 ```bash
+# OpenAI
 export TRICODE_OPENAI_API_KEY="sk-your-api-key"
 export TRICODE_OPENAI_BASE_URL="https://api.openai.com/v1"
-export TRICODE_OPENAI_MODEL="gpt-4o"
+export TRICODE_OPENAI_MODEL="gpt-4o-mini"
+
+# Anthropic
+export TRICODE_ANTHROPIC_API_KEY="ak-your-api-key"
+export TRICODE_ANTHROPIC_BASE_URL="https://api.anthropic.com/v1"
+export TRICODE_ANTHROPIC_MODEL="claude-3-5-sonnet-20241022"
 ```
 
-Priority: **Environment Variables > settings.json > Defaults**
+Priority: Environment Variables > settings.json > Defaults
 
 ## Usage
 
@@ -171,6 +216,9 @@ Features:
 # Start TUI with restricted tools
 ./tricode.py --tui --tools "read_file,search_context"
 
+# Choose provider explicitly
+./tricode.py --tui --provider anthropic
+
 # Resume a session in TUI mode
 ./tricode.py --tui --resume abc123
 ```
@@ -199,6 +247,7 @@ Features:
     - Code generation: `--tools "read_file,create_file,edit_file"`
     - Command execution: `--tools "run_command,read_file"`
 - `--override-system-prompt`: Replace default system prompt with AGENTS.md content
+- `--provider <NAME>`: Select provider for this run (overrides `default_provider`)
 - `-r, --resume <SESSION_ID>`: Resume a previous conversation session
 - `-l, --list-conversations`: List all available conversation sessions
 

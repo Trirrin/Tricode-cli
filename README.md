@@ -25,6 +25,20 @@ After installation, restart your terminal and run:
 tricode --help
 ```
 
+### Update
+
+Keep your `tricode` up to date with the latest release:
+
+```bash
+tricode --update
+```
+
+Behavior:
+- Fetches the latest GitHub release tag.
+- Compares with local version shown by `tricode --version`.
+- If newer exists, downloads the matching asset for your OS/arch and replaces the current binary.
+- Default install location is `~/.local/bin/tricode` when not found in `PATH`.
+
 ### Supported Platforms
 
 - **Linux**: x86_64, ARM64

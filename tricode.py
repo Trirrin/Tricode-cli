@@ -2,6 +2,14 @@
 
 import argparse
 import sys
+import os
+import platform
+import tempfile
+import json
+import urllib.request
+import shutil
+import tarfile
+import zipfile
 from agent import run_agent, list_conversations
 from agent.tui import run_tui
 
@@ -27,6 +35,174 @@ class VersionedHelpFormatter(argparse.RawDescriptionHelpFormatter):
         version_line = f"{get_runtime_version()}\n\n"
         return version_line + help_text
 
+
+REPO = "Trirrin/Tricode-cli"
+
+
+def _semver_tuple(v: str):
+    """Convert version string like 'v1.2.3' to tuple(1,2,3)."""
+    s = v.strip()
+    if s.startswith(('v', 'V')):
+        s = s[1:]
+    parts = s.split('.')
+    out = []
+    for p in parts:
+        try:
+            out.append(int(p))
+        except ValueError:
+            # Fallback for non-numeric parts
+            num = ''.join(ch for ch in p if ch.isdigit())
+            out.append(int(num) if num else 0)
+    while len(out) < 3:
+        out.append(0)
+    return tuple(out[:3])
+
+
+def _detect_asset_suffix():
+    """Map current OS/arch to release asset suffix."""
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if system == 'linux':
+        if machine in ('x86_64', 'amd64'):
+            return 'linux-x86_64'
+        if machine in ('aarch64', 'arm64'):
+            return 'linux-arm64'
+        raise RuntimeError(f"Unsupported Linux architecture: {machine}")
+    if system == 'darwin':
+        if machine == 'x86_64':
+            return 'macos-x86_64'
+        if machine == 'arm64':
+            return 'macos-arm64'
+        raise RuntimeError(f"Unsupported macOS architecture: {machine}")
+    raise RuntimeError(f"Unsupported OS: {system}")
+
+
+def _fetch_latest_release():
+    """Fetch latest release JSON from GitHub API."""
+    url = f"https://api.github.com/repos/{REPO}/releases/latest"
+    with urllib.request.urlopen(url, timeout=15) as resp:
+        data = resp.read().decode('utf-8')
+    return json.loads(data)
+
+
+def _find_asset_url(assets, suffix: str):
+    """Find asset url that contains required suffix."""
+    for a in assets:
+        url = a.get('browser_download_url') or ''
+        name = a.get('name') or ''
+        if f"tricode-{suffix}" in url or f"tricode-{suffix}" in name:
+            return url
+    return None
+
+
+def _extract_binary(archive_path: str, workdir: str) -> str:
+    """Extract downloaded archive and return path to binary."""
+    base = os.path.basename(archive_path)
+    if base.endswith('.tar.gz'):
+        with tarfile.open(archive_path, 'r:gz') as tf:
+            tf.extractall(workdir)
+        # Try to locate binary
+        for root, _dirs, files in os.walk(workdir):
+            for f in files:
+                if f == 'tricode' or f == 'tricode.exe':
+                    return os.path.join(root, f)
+        raise RuntimeError('Binary not found in tarball')
+    if base.endswith('.zip'):
+        with zipfile.ZipFile(archive_path) as zf:
+            zf.extractall(workdir)
+        for root, _dirs, files in os.walk(workdir):
+            for f in files:
+                if f == 'tricode' or f == 'tricode.exe':
+                    return os.path.join(root, f)
+        raise RuntimeError('Binary not found in zip')
+    # Direct binary
+    return archive_path
+
+
+def _resolve_target_path() -> str:
+    """Resolve current installation target path for replacement."""
+    # Prefer the running executable if it looks like the installed binary
+    exec_path = shutil.which('tricode')
+    if exec_path and os.path.isfile(exec_path):
+        return exec_path
+    # Fallback to default install location
+    return os.path.join(os.path.expanduser('~/.local/bin'), 'tricode')
+
+
+def update_self(current_version: str):
+    """Self-update by downloading latest release and replacing binary."""
+    try:
+        latest = _fetch_latest_release()
+    except Exception as e:
+        print(f"[ERROR] Failed to query GitHub releases: {e}")
+        sys.exit(2)
+
+    tag = latest.get('tag_name') or ''
+    if not tag:
+        print('[ERROR] Latest release tag not found')
+        sys.exit(2)
+
+    try:
+        cur = _semver_tuple(current_version)
+        lat = _semver_tuple(tag)
+    except Exception:
+        cur = (0, 0, 0)
+        lat = (0, 0, 0)
+
+    if lat <= cur:
+        print(f"Already up-to-date (current {current_version}, latest {tag}).")
+        return
+
+    try:
+        suffix = _detect_asset_suffix()
+    except Exception as e:
+        print(f"[ERROR] {e}")
+        sys.exit(2)
+
+    assets = latest.get('assets') or []
+    url = _find_asset_url(assets, suffix)
+    if not url:
+        print(f"[ERROR] No matching asset for '{suffix}'.")
+        sys.exit(2)
+
+    target_path = _resolve_target_path()
+    install_dir = os.path.dirname(target_path)
+    os.makedirs(install_dir, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix='tricode-update-') as td:
+        archive_path = os.path.join(td, os.path.basename(url))
+        try:
+            with urllib.request.urlopen(url, timeout=60) as resp, open(archive_path, 'wb') as f:
+                shutil.copyfileobj(resp, f)
+        except Exception as e:
+            print(f"[ERROR] Download failed: {e}")
+            sys.exit(3)
+
+        try:
+            bin_path = _extract_binary(archive_path, td)
+        except Exception as e:
+            print(f"[ERROR] Extract failed: {e}")
+            sys.exit(4)
+
+        final_tmp = os.path.join(td, 'tricode.new')
+        shutil.copy2(bin_path, final_tmp)
+        try:
+            os.chmod(final_tmp, 0o755)
+        except Exception:
+            pass
+
+        try:
+            # Atomic replace
+            os.replace(final_tmp, target_path)
+        except PermissionError:
+            print(f"[ERROR] Permission denied writing to {target_path}. Try with proper permissions.")
+            sys.exit(5)
+        except Exception as e:
+            print(f"[ERROR] Failed to install binary: {e}")
+            sys.exit(5)
+
+    print(f"Updated to {tag}. Installed at: {target_path}")
+
 def main():
     parser = argparse.ArgumentParser(
         description="Autonomous AI agent with file operation capabilities",
@@ -44,6 +220,11 @@ Examples:
         action="version",
         version=get_runtime_version(),
         help="Show version information and exit"
+    )
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="Update tricode to the latest release"
     )
     
     parser.add_argument(
@@ -129,6 +310,15 @@ Examples:
     
     args = parser.parse_args()
     
+    if args.update:
+        # Use imported build-time version if available
+        try:
+            current = __version__
+        except NameError:
+            current = "dev"
+        update_self(current)
+        return
+
     if args.list_conversations:
         list_conversations()
         return

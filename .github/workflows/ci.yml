@@ -53,6 +53,18 @@ jobs:
           mkdir -p release
           cp dist/tricode* release/tricode-${{ matrix.asset_suffix }}
 
+      - name: List build outputs (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          echo "PWD: $(pwd)"
+          ls -la || true
+          echo "\n== dist =="
+          ls -la dist || true
+          echo "\n== release =="
+          ls -la release || true
+          echo "\n== find release =="
+          find release -maxdepth 2 -type f -print || true
+
       # ==== MacOS ====
       - name: Build on macOS
         if: startsWith(matrix.os, 'macos')
@@ -64,6 +76,18 @@ jobs:
           mkdir -p release
           cp dist/tricode* release/tricode-${{ matrix.asset_suffix }}
 
+      - name: List build outputs (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          echo "PWD: $(pwd)"
+          ls -la || true
+          echo "\n== dist =="
+          ls -la dist || true
+          echo "\n== release =="
+          ls -la release || true
+          echo "\n== find release =="
+          find release -maxdepth 2 -type f -print || true
+
       # ==== Windows ====
       - name: Build on Windows
         if: startsWith(matrix.os, 'windows')
@@ -74,6 +98,19 @@ jobs:
           build.bat auto
           mkdir release
           copy dist\tricode.exe release\tricode-${{ matrix.asset_suffix }}.exe
+
+      - name: List build outputs (Windows)
+        if: startsWith(matrix.os, 'windows')
+        shell: cmd
+        run: |
+          echo PWD: %CD%
+          dir
+          echo.
+          echo == dist ==
+          dir dist
+          echo.
+          echo == release ==
+          dir release
 
       - name: Upload artifact (Windows)
         if: startsWith(matrix.os, 'windows')

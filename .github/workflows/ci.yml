@@ -50,20 +50,6 @@ jobs:
           pip install pyinstaller
           chmod +x build.sh
           ./build.sh auto
-          mkdir -p release
-          cp dist/tricode* release/tricode-${{ matrix.asset_suffix }}
-
-      - name: List build outputs (Linux)
-        if: startsWith(matrix.os, 'ubuntu')
-        run: |
-          echo "PWD: $(pwd)"
-          ls -la || true
-          echo "\n== dist =="
-          ls -la dist || true
-          echo "\n== release =="
-          ls -la release || true
-          echo "\n== find release =="
-          find release -maxdepth 2 -type f -print || true
 
       # ==== MacOS ====
       - name: Build on macOS
@@ -73,20 +59,6 @@ jobs:
           pip install pyinstaller
           chmod +x build.sh
           ./build.sh auto
-          mkdir -p release
-          cp dist/tricode* release/tricode-${{ matrix.asset_suffix }}
-
-      - name: List build outputs (macOS)
-        if: startsWith(matrix.os, 'macos')
-        run: |
-          echo "PWD: $(pwd)"
-          ls -la || true
-          echo "\n== dist =="
-          ls -la dist || true
-          echo "\n== release =="
-          ls -la release || true
-          echo "\n== find release =="
-          find release -maxdepth 2 -type f -print || true
 
       # ==== Windows ====
       - name: Build on Windows
@@ -96,21 +68,6 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
           build.bat auto
-          if not exist release mkdir release
-          copy /y dist\tricode.exe release\tricode-${{ matrix.asset_suffix }}.exe || exit /b 1
-
-      - name: List build outputs (Windows)
-        if: startsWith(matrix.os, 'windows')
-        shell: cmd
-        run: |
-          echo PWD: %CD%
-          dir
-          echo.
-          echo == dist ==
-          dir dist
-          echo.
-          echo == release ==
-          dir release
 
       - name: Upload artifact (Windows)
         if: startsWith(matrix.os, 'windows')
@@ -118,7 +75,7 @@ jobs:
         with:
           name: tricode-${{ matrix.asset_suffix }}
           path: |
-            release/tricode-${{ matrix.asset_suffix }}.exe
+            dist/tricode.exe
 
       - name: Upload artifact (Unix)
         if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
@@ -126,18 +83,18 @@ jobs:
         with:
           name: tricode-${{ matrix.asset_suffix }}
           path: |
-            release/tricode-${{ matrix.asset_suffix }}
+            dist/tricode
           
       - name: Upload to release (Windows)
         if: github.event_name == 'release' && startsWith(matrix.os, 'windows')
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload ${{ github.event.release.tag_name }} release/tricode-${{ matrix.asset_suffix }}.exe --clobber
+          gh release upload ${{ github.event.release.tag_name }} dist/tricode.exe#tricode-${{ matrix.asset_suffix }}.exe --clobber
 
       - name: Upload to release (Unix)
         if: github.event_name == 'release' && (startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos'))
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload ${{ github.event.release.tag_name }} release/tricode-${{ matrix.asset_suffix }} --clobber
+          gh release upload ${{ github.event.release.tag_name }} dist/tricode#tricode-${{ matrix.asset_suffix }} --clobber

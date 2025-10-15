@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - '**'
-    tags:
-      - 'v*'
   release:
     types: [created]
 
@@ -15,14 +13,12 @@ jobs:
       matrix:
         include:
           # --- Linux ---
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             arch: x86_64
             asset_suffix: linux-x86_64
-            docker_platform: linux/amd64
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm64
             arch: arm64
             asset_suffix: linux-arm64
-            docker_platform: linux/arm64
           # --- MacOS ---
           - os: macos-14 # arm64 runner
             arch: arm64
@@ -41,29 +37,21 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ==== Linux（本机/容器多架构） ====
-      - name: Set up QEMU for ARM
-        if: startsWith(matrix.os, 'ubuntu')
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.x'
 
-      - name: Build on Linux Multi-Arch (via Docker)
+      # ==== Linux (native runners, no Docker) ====
+      - name: Build on Linux (native)
         if: startsWith(matrix.os, 'ubuntu')
         run: |
-          docker run --rm --platform=${{ matrix.docker_platform }} \
-            -v $PWD:/workspace -w /workspace \
-            python:3 bash -c "
-              apt-get update && apt-get install -y gcc && \
-              pip install -r requirements.txt && pip install pyinstaller && \
-              chmod +x build.sh && ./build.sh auto && \
-              cp -r dist dist_${{ matrix.asset_suffix }}
-            "
+          pip install -r requirements.txt
+          pip install pyinstaller
+          chmod +x build.sh
+          ./build.sh auto
           mkdir -p release
-          cp dist_${{ matrix.asset_suffix }}/tricode* release/tricode-${{ matrix.asset_suffix }}
+          cp dist/tricode* release/tricode-${{ matrix.asset_suffix }}
 
       # ==== MacOS ====
       - name: Build on macOS
@@ -92,7 +80,7 @@ jobs:
         with:
           name: tricode-${{ matrix.asset_suffix }}
           path: |
-            release/tricode-${{ matrix.asset_suffix }}*
+            dist/tricode-${{ matrix.asset_suffix }}*
           
       - name: Upload to release
         if: github.event_name == 'release'

@@ -30,6 +30,7 @@ LAST_PLAN_UPDATE_AT = 0
 WORK_DIR = None
 BYPASS_WORK_DIR_LIMIT = False
 BYPASS_PERMISSION = False
+BYPASS_PLAN_CHECK = False
 EXIT_ON_TERMINATE = True
 SESSION_APPROVED_TOOLS = set()
 PERMISSION_CALLBACK = None
@@ -58,6 +59,10 @@ def set_work_dir(work_dir: str = None, bypass: bool = False) -> None:
 def set_bypass_permission(bypass: bool = False) -> None:
     global BYPASS_PERMISSION
     BYPASS_PERMISSION = bypass
+
+def set_bypass_plan_check(bypass: bool = False) -> None:
+    global BYPASS_PLAN_CHECK
+    BYPASS_PLAN_CHECK = bypass
 
 def set_exit_on_terminate(exit_on_terminate: bool = True) -> None:
     """Configure whether denial should terminate the whole process.
@@ -741,6 +746,19 @@ def delete_path(path: str, recursive: bool = False) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Delete failed: {str(e)}"
 
+def _with_line_numbers(content: str, start_number: int = 1) -> str:
+    """Prefix each line with its 1-based line number."""
+    if not content:
+        return content
+
+    numbered_chunks = []
+    current = max(1, start_number)
+    for line in content.splitlines(keepends=True):
+        numbered_chunks.append(f"{current}: {line}")
+        current += 1
+    return ''.join(numbered_chunks)
+
+
 def read_file(path: str, start_line: int = None, end_line: int = None, max_bytes: int = None, with_metadata: bool = False) -> Tuple[bool, str]:
     """Simple file read with optional line window and byte cap.
     Full file by default; clamps safely when limited.
@@ -751,6 +769,7 @@ def read_file(path: str, start_line: int = None, end_line: int = None, max_bytes
         return False, err_msg
     
     try:
+        line_start = 1
         with open(resolved_path, 'r', encoding='utf-8') as f:
             if start_line is not None:
                 lines = f.readlines()
@@ -759,6 +778,7 @@ def read_file(path: str, start_line: int = None, end_line: int = None, max_bytes
                 e = int(end_line) if end_line is not None else total
                 e = max(s, min(e, total))
                 content = ''.join(lines[s-1:e])
+                line_start = s
             else:
                 content = f.read()
 
@@ -766,6 +786,8 @@ def read_file(path: str, start_line: int = None, end_line: int = None, max_bytes
             b = content.encode('utf-8')
             if len(b) > max_bytes:
                 content = b[:max_bytes].decode('utf-8', errors='ignore')
+
+        content = _with_line_numbers(content, line_start)
 
         if not with_metadata:
             return True, content
@@ -1806,8 +1828,8 @@ def format_tool_call(name: str, arguments: dict) -> str:
 
 def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
     global PLAN_DECISION_MADE, SIGNIFICANT_ACTIONS_COUNT
-    
-    if name != "plan" and not PLAN_DECISION_MADE:
+
+    if name != "plan" and not PLAN_DECISION_MADE and not BYPASS_PLAN_CHECK:
         return False, (
             "⚠️ BLOCKED: You must make a plan decision first.\n"
             "Call plan(action='create', tasks=[...]) for multi-step tasks, "

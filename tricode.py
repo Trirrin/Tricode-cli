@@ -10,8 +10,10 @@ import urllib.request
 import shutil
 import tarfile
 import zipfile
+import asyncio
 from agent import run_agent, list_conversations
 from agent.tui import run_tui
+from agent.mcp_server import run_mcp_server
 
 try:
     from version import get_runtime_version, get_full_version_string, __version__, __commit_id__
@@ -307,7 +309,13 @@ Examples:
         action="store_true",
         help="Launch interactive TUI (Text User Interface) mode"
     )
-    
+
+    parser.add_argument(
+        "--mcp-server",
+        action="store_true",
+        help="Start as MCP (Model Context Protocol) server via stdio"
+    )
+
     args = parser.parse_args()
     
     if args.update:
@@ -322,7 +330,15 @@ Examples:
     if args.list_conversations:
         list_conversations()
         return
-    
+
+    if args.mcp_server:
+        asyncio.run(run_mcp_server(
+            work_dir=args.work_dir,
+            bypass_work_dir_limit=args.bypass_work_directory_limit,
+            bypass_permission=args.bypass_permission
+        ))
+        return
+
     if args.tui:
         allowed_tools = None
         if args.tools:

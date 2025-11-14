@@ -604,6 +604,30 @@ def _python_semantic_references(filepath: str, symbol_name: str) -> List[SymbolR
         return []
 
     references: List[SymbolReference] = []
+
+    call_callee_spans: set[Tuple[int, int, int, int]] = set()
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        name = None
+        if isinstance(target, ast.Name):
+            name = target.id
+        elif isinstance(target, ast.Attribute) and isinstance(target.attr, str):
+            name = target.attr
+        if name != symbol_name:
+            continue
+        line = getattr(target, "lineno", None)
+        col = getattr(target, "col_offset", None)
+        end_line = getattr(target, "end_lineno", line)
+        end_col = getattr(target, "end_col_offset", col)
+        if not isinstance(line, int) or not isinstance(col, int):
+            continue
+        if not isinstance(end_line, int) or not isinstance(end_col, int):
+            end_line = line
+            end_col = col
+        call_callee_spans.add((line, col, end_line, end_col))
+
     for node in ast.walk(module):
         if isinstance(node, ast.Call):
             target = node.func
@@ -647,6 +671,9 @@ def _python_semantic_references(filepath: str, symbol_name: str) -> List[SymbolR
             if not isinstance(end_line, int) or not isinstance(end_col, int):
                 end_line = line
                 end_col = col
+            span = (line, col, end_line, end_col)
+            if span in call_callee_spans:
+                continue
             references.append(
                 SymbolReference(
                     file_path=filepath,

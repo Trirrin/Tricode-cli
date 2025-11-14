@@ -40,7 +40,7 @@ TOOL_DEFINITIONS = [
     ),
     Tool(
         name="search_symbol",
-        description="Search for Python function definitions by symbol name and return full function bodies with line numbers.",
+        description="Search for function, type, and class definitions by symbol name across supported languages and return full definition blocks with line numbers. Matching is case-sensitive and requires the exact symbol name.",
         inputSchema={
             "type": "object",
             "properties": {

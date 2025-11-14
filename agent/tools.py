@@ -22,7 +22,7 @@ from ddgs import DDGS
 import difflib
 import hashlib
 
-from agent.symbol_search import SymbolBlock, search_symbol_blocks
+from agent.symbol_search import SymbolBlock, search_symbol_blocks, collect_all_symbol_blocks
 
 CURRENT_PLAN = None
 CURRENT_SESSION_ID = None
@@ -684,7 +684,10 @@ TOOLS_SCHEMA = [
 ]
 
 def search_symbol(symbol: str, path: str = ".", max_results: Optional[int] = None) -> Tuple[bool, str]:
-    """Search symbol definitions via indentation- and brace-aware AST parsing."""
+    """Search function, type, and class definitions by symbol name across supported languages.
+
+    Matching is case-sensitive and requires the exact symbol name.
+    """
     if not symbol or not isinstance(symbol, str):
         return False, "Symbol name is required"
 
@@ -699,7 +702,7 @@ def search_symbol(symbol: str, path: str = ".", max_results: Optional[int] = Non
         return False, f"Symbol search failed: {str(exc)}"
 
     if not blocks:
-        return True, "No symbol definitions found"
+        return _render_symbol_miss(symbol, resolved_path)
 
     rendered: list[str] = []
     for block in blocks:
@@ -708,7 +711,7 @@ def search_symbol(symbol: str, path: str = ".", max_results: Optional[int] = Non
             rendered.append(snippet)
 
     if not rendered:
-        return True, "No symbol definitions found"
+        return _render_symbol_miss(symbol, resolved_path)
 
     return True, "\n\n".join(rendered)
 
@@ -729,7 +732,55 @@ def _render_symbol_block(block: SymbolBlock) -> Tuple[bool, str]:
     slice_content = "".join(lines[block.start_line - 1 : end_line])
     numbered = _with_line_numbers(slice_content, block.start_line)
     header = f"{block.filepath}:{block.start_line}-{end_line}"
+
+    meta_parts: list[str] = []
+    if getattr(block, "language", None):
+        meta_parts.append(f"language={block.language}")
+    if getattr(block, "kind", None):
+        meta_parts.append(f"kind={block.kind}")
+    if getattr(block, "name", None):
+        meta_parts.append(f"name={block.name}")
+    if meta_parts:
+        header = f"{header} [{' '.join(meta_parts)}]"
+
     return True, f"{header}\n{numbered}"
+
+
+def _render_symbol_miss(symbol: str, resolved_path: str) -> Tuple[bool, str]:
+    try:
+        any_indexed = bool(collect_all_symbol_blocks(resolved_path, max_results=1))
+    except Exception:
+        any_indexed = False
+
+    if not any_indexed:
+        return True, (
+            "No symbol definitions found.\n"
+            "Note: no symbols are indexed under this path. "
+            "The languages here may not be supported by search_symbol."
+        )
+
+    found_usage = False
+    try:
+        ok, context_output = search_context(symbol, resolved_path)
+        if ok and context_output.strip():
+            found_usage = True
+    except Exception:
+        found_usage = False
+
+    if found_usage:
+        return True, (
+            "No symbol definitions found.\n"
+            "Plain text search found occurrences of this name, "
+            "but none were recognized as definitional symbols.\n"
+            "This usually means the construct or language is not covered "
+            "by the symbol index (for example, macros or generated code)."
+        )
+
+    return True, (
+        "No symbol definitions found.\n"
+        "Symbols are indexed under this path, but there is no "
+        f"definition with the exact name '{symbol}'."
+    )
 
 
 

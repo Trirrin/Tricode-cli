@@ -14,6 +14,9 @@ class SymbolBlock:
     filepath: str
     start_line: int
     end_line: int
+    language: Optional[str] = None
+    kind: Optional[str] = None
+    name: Optional[str] = None
 
 
 @dataclass
@@ -56,6 +59,20 @@ def collect_all_symbol_blocks(root: str, max_results: Optional[int]) -> List[Sym
     return python_blocks + tree_blocks
 
 
+_PY_SHEBANG_RE = re.compile(r"^#!.*\bpython[0-9.]*\b")
+
+
+def _is_python_source_file(filepath: str, name: str) -> bool:
+    if name.endswith(".py"):
+        return True
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as handle:
+            first_line = handle.readline()
+    except Exception:
+        return False
+    return bool(_PY_SHEBANG_RE.match(first_line))
+
+
 def _collect_python_blocks(
     root: str,
     max_results: Optional[int],
@@ -66,9 +83,9 @@ def _collect_python_blocks(
 
     for dirpath, _, filenames in os.walk(root):
         for name in filenames:
-            if not name.endswith(".py"):
-                continue
             filepath = os.path.join(dirpath, name)
+            if not _is_python_source_file(filepath, name):
+                continue
             try:
                 with open(filepath, "r", encoding="utf-8", errors="ignore") as handle:
                     source = handle.read()
@@ -84,7 +101,10 @@ def _collect_python_blocks(
             for node in ast.walk(module):
                 if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     continue
-                if name_predicate is not None and not name_predicate(node.name):
+                node_name = getattr(node, "name", None)
+                if not isinstance(node_name, str):
+                    continue
+                if name_predicate is not None and not name_predicate(node_name):
                     continue
 
                 start_line = _python_node_start_line(node)
@@ -92,7 +112,21 @@ def _collect_python_blocks(
                 if not isinstance(end_line, int):
                     end_line = _infer_python_end_line(lines, start_line)
 
-                matches.append(SymbolBlock(filepath=filepath, start_line=start_line, end_line=end_line))
+                if isinstance(node, ast.ClassDef):
+                    kind = "class"
+                else:
+                    kind = "function"
+
+                matches.append(
+                    SymbolBlock(
+                        filepath=filepath,
+                        start_line=start_line,
+                        end_line=end_line,
+                        language="python",
+                        kind=kind,
+                        name=node_name,
+                    )
+                )
                 if max_count is not None and len(matches) >= max_count:
                     return matches
 
@@ -176,7 +210,29 @@ def _collect_tree_sitter_blocks(
                 if config.comment_prefixes:
                     start_line = _extend_comment_region(lines, start_line, config.comment_prefixes)
 
-                matches.append(SymbolBlock(filepath=filepath, start_line=start_line, end_line=end_line))
+                primary_name: Optional[str] = None
+                if name_predicate is None:
+                    primary_name = names[0]
+                else:
+                    for candidate_name in names:
+                        if name_predicate([candidate_name]):
+                            primary_name = candidate_name
+                            break
+                    if primary_name is None:
+                        primary_name = names[0]
+
+                kind = _infer_symbol_kind(language_key, node.type)
+
+                matches.append(
+                    SymbolBlock(
+                        filepath=filepath,
+                        start_line=start_line,
+                        end_line=end_line,
+                        language=config.language,
+                        kind=kind,
+                        name=primary_name,
+                    )
+                )
                 if max_count is not None and len(matches) >= max_count:
                     return matches
 
@@ -258,12 +314,79 @@ def _c_like_extractor(node: Node, source: bytes) -> Iterable[str]:
     for chunk in tokens:
         names.add(chunk)
         parts = [part for part in chunk.split("::") if part]
-        names.update(parts)
+        if len(parts) > 1:
+            names.add(parts[-1])
     return names
+
+
+def _cpp_extractor(node: Node, source: bytes) -> Iterable[str]:
+    node_type = node.type
+    if node_type in ("function_definition", "function_declaration", "method_definition"):
+        return _c_like_extractor(node, source)
+    if node_type in ("class_specifier", "struct_specifier", "enum_specifier"):
+        child = node.child_by_field_name("name")
+        if child is None:
+            return []
+        return [_slice_text(source, child)]
+    return []
 
 
 def _slice_text(source: bytes, node: Node) -> str:
     return source[node.start_byte : node.end_byte].decode("utf-8", errors="ignore")
+
+
+def _infer_symbol_kind(language_key: str, node_type: str) -> Optional[str]:
+    lang = language_key
+    t = node_type
+    if lang == "cpp":
+        if t in ("class_specifier", "struct_specifier"):
+            return "class"
+        if t == "enum_specifier":
+            return "enum"
+        if "function" in t:
+            return "function"
+        if "method" in t:
+            return "method"
+        return None
+    if lang in ("c", "go"):
+        if "function" in t:
+            return "function"
+        if "method" in t:
+            return "method"
+        if t == "type_spec":
+            return "type"
+        return None
+    if lang == "rust":
+        if t in ("function_item", "method_item"):
+            return "function"
+        if t == "struct_item":
+            return "struct"
+        if t == "enum_item":
+            return "enum"
+        if t == "trait_item":
+            return "trait"
+        if t == "impl_item":
+            return "impl"
+        if t == "mod_item":
+            return "module"
+        return None
+    if lang == "java":
+        if t == "class_declaration":
+            return "class"
+        if t == "interface_declaration":
+            return "interface"
+        if t == "enum_declaration":
+            return "enum"
+        if t == "record_declaration":
+            return "record"
+        if t == "annotation_type_declaration":
+            return "annotation"
+        if t == "method_declaration":
+            return "method"
+        if t == "constructor_declaration":
+            return "constructor"
+        return None
+    return None
 
 
 @lru_cache(maxsize=None)
@@ -285,25 +408,52 @@ _TREE_SITTER_CONFIGS = {
     ),
     "cpp": TreeSitterConfig(
         language="cpp",
-        node_types=("function_definition", "function_declaration", "method_definition"),
+        node_types=(
+            "function_definition",
+            "function_declaration",
+            "method_definition",
+            "class_specifier",
+            "struct_specifier",
+            "enum_specifier",
+        ),
         comment_prefixes=("//", "/*", "*", "*/"),
-        extractor=_c_like_extractor,
+        extractor=_cpp_extractor,
     ),
     "java": TreeSitterConfig(
         language="java",
-        node_types=("method_declaration", "constructor_declaration"),
+        node_types=(
+            "class_declaration",
+            "interface_declaration",
+            "enum_declaration",
+            "record_declaration",
+            "annotation_type_declaration",
+            "method_declaration",
+            "constructor_declaration",
+        ),
         comment_prefixes=("//", "/*", "*", "*/"),
         extractor=_make_field_extractor("name"),
     ),
     "go": TreeSitterConfig(
         language="go",
-        node_types=("function_declaration", "method_declaration"),
+        node_types=(
+            "function_declaration",
+            "method_declaration",
+            "type_spec",
+        ),
         comment_prefixes=("//", "/*", "*", "*/"),
         extractor=_make_field_extractor("name"),
     ),
     "rust": TreeSitterConfig(
         language="rust",
-        node_types=("function_item", "method_item"),
+        node_types=(
+            "function_item",
+            "method_item",
+            "struct_item",
+            "enum_item",
+            "trait_item",
+            "impl_item",
+            "mod_item",
+        ),
         comment_prefixes=("//", "/*", "*", "*/"),
         extractor=_make_field_extractor("name"),
     ),

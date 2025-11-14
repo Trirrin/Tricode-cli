@@ -1390,25 +1390,31 @@ def read_file(path: str, start_line: int = None, end_line: int = None, max_bytes
     
     try:
         line_start = 1
+        note = None
         with open(resolved_path, 'r', encoding='utf-8') as f:
             if start_line is not None:
                 lines = f.readlines()
                 total = len(lines)
                 s = max(1, int(start_line))
-                e = int(end_line) if end_line is not None else total
+                requested_end = int(end_line) if end_line is not None else None
+                e = requested_end if requested_end is not None else total
                 e = max(s, min(e, total))
                 content = ''.join(lines[s-1:e])
+                if requested_end is not None and requested_end > total:
+                    note = "NOTE: Requested end_line exceeds file length; this is all available content.\n"
                 line_start = s
             else:
                 content = f.read()
-
+ 
         if isinstance(max_bytes, int) and max_bytes is not None and max_bytes >= 0:
             b = content.encode('utf-8')
             if len(b) > max_bytes:
                 content = b[:max_bytes].decode('utf-8', errors='ignore')
-
+ 
         content = _with_line_numbers(content, line_start)
-
+        if note:
+            content = content.rstrip('\n') + '\n' + note
+ 
         if not with_metadata:
             return True, content
 

@@ -1,6 +1,7 @@
 import os
 import shutil
 import re
+
 import subprocess
 import tempfile
 from typing import Tuple, Dict, Optional
@@ -20,6 +21,8 @@ from bs4 import BeautifulSoup
 from ddgs import DDGS
 import difflib
 import hashlib
+
+from agent.symbol_search import SymbolBlock, search_symbol_blocks
 
 CURRENT_PLAN = None
 CURRENT_SESSION_ID = None
@@ -431,7 +434,12 @@ TOOLS_SCHEMA = [
                     "show_hidden": {
                         "type": "boolean",
                         "description": "Whether to show hidden files (starting with .)",
-                        "default": True
+                        "default": False
+                    },
+                    "recursive": {
+                        "type": "boolean",
+                        "description": "Whether to include the entire directory tree (ls -R style)",
+                        "default": False
                     }
                 },
                 "required": []
@@ -675,12 +683,63 @@ TOOLS_SCHEMA = [
     }
 ]
 
+def search_symbol(symbol: str, path: str = ".", max_results: Optional[int] = None) -> Tuple[bool, str]:
+    """Search symbol definitions via indentation- and brace-aware AST parsing."""
+    if not symbol or not isinstance(symbol, str):
+        return False, "Symbol name is required"
+
+    resolved_path = resolve_path(path)
+    valid, err_msg = validate_path(resolved_path)
+    if not valid:
+        return False, err_msg
+
+    try:
+        blocks = search_symbol_blocks(symbol, resolved_path, max_results)
+    except Exception as exc:
+        return False, f"Symbol search failed: {str(exc)}"
+
+    if not blocks:
+        return True, "No symbol definitions found"
+
+    rendered: list[str] = []
+    for block in blocks:
+        ok, snippet = _render_symbol_block(block)
+        if ok:
+            rendered.append(snippet)
+
+    if not rendered:
+        return True, "No symbol definitions found"
+
+    return True, "\n\n".join(rendered)
+
+
+def _render_symbol_block(block: SymbolBlock) -> Tuple[bool, str]:
+    try:
+        with open(block.filepath, "r", encoding="utf-8", errors="ignore") as handle:
+            lines = handle.readlines()
+    except Exception as exc:
+        return False, f"Read failed for {block.filepath}: {str(exc)}"
+
+    if block.start_line < 1 or block.start_line > len(lines):
+        return False, f"Start line out of range for {block.filepath}"
+    end_line = min(block.end_line, len(lines))
+    if end_line < block.start_line:
+        end_line = block.start_line
+
+    slice_content = "".join(lines[block.start_line - 1 : end_line])
+    numbered = _with_line_numbers(slice_content, block.start_line)
+    header = f"{block.filepath}:{block.start_line}-{end_line}"
+    return True, f"{header}\n{numbered}"
+
+
+
+
 def search_context(pattern: str, path: str = ".") -> Tuple[bool, str]:
     resolved_path = resolve_path(path)
     valid, err_msg = validate_path(resolved_path)
     if not valid:
         return False, err_msg
-    
+
     try:
         result = subprocess.run(
             ["rg", "-n", "--", pattern, resolved_path],
@@ -693,21 +752,40 @@ def search_context(pattern: str, path: str = ".") -> Tuple[bool, str]:
         elif result.returncode == 1:
             return True, "No matches found"
         else:
-            return False, f"Search error: {result.stderr}"
+            stderr_text = result.stderr or ""
+            if "regex parse error" in stderr_text:
+                escaped = re.escape(pattern)
+                retry = subprocess.run(
+                    ["rg", "-n", "--", escaped, resolved_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if retry.returncode == 0:
+                    return True, retry.stdout
+                elif retry.returncode == 1:
+                    return True, "No matches found"
+                return False, f"Search error: {retry.stderr}"
+            return False, f"Search error: {stderr_text}"
     except FileNotFoundError:
         return _fallback_search(pattern, resolved_path)
     except Exception as e:
         return False, f"Search failed: {str(e)}"
 
 def _fallback_search(pattern: str, path: str) -> Tuple[bool, str]:
+    """Fallback text search when ripgrep is not available."""
     try:
-        regex = re.compile(pattern)
+        try:
+            regex = re.compile(pattern)
+        except re.error:
+            regex = re.compile(re.escape(pattern))
+
         results = []
         for root, _, files in os.walk(path):
             for file in files:
                 filepath = os.path.join(root, file)
                 try:
-                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                    with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                         for i, line in enumerate(f, 1):
                             if regex.search(line):
                                 results.append(f"{filepath}:{i}:{line.rstrip()}")
@@ -1179,7 +1257,11 @@ def edit_file(path: str, hunks: list = None, precondition: dict = None, dry_run:
     except Exception as e:
         return False, f"Edit failed: {str(e)}"
 
-def list_directory(path: str = ".", show_hidden: bool = True) -> Tuple[bool, str]:
+def list_directory(
+    path: str = ".",
+    show_hidden: bool = False,
+    recursive: bool = False,
+) -> Tuple[bool, str]:
     resolved_path = resolve_path(path)
     valid, err_msg = validate_path(resolved_path)
     if not valid:
@@ -1187,6 +1269,8 @@ def list_directory(path: str = ".", show_hidden: bool = True) -> Tuple[bool, str
     
     try:
         cmd = ["ls", "-la"] if show_hidden else ["ls", "-l"]
+        if recursive:
+            cmd.append("-R")
         result = subprocess.run(
             cmd + [resolved_path],
             capture_output=True,
@@ -1198,11 +1282,15 @@ def list_directory(path: str = ".", show_hidden: bool = True) -> Tuple[bool, str
         else:
             return False, f"ls command error: {result.stderr}"
     except FileNotFoundError:
-        return _fallback_list_directory(resolved_path, show_hidden)
+        return _fallback_list_directory(resolved_path, show_hidden, recursive)
     except Exception as e:
-        return _fallback_list_directory(resolved_path, show_hidden)
+        return _fallback_list_directory(resolved_path, show_hidden, recursive)
 
-def _fallback_list_directory(path: str, show_hidden: bool = True) -> Tuple[bool, str]:
+def _fallback_list_directory(
+    path: str,
+    show_hidden: bool = False,
+    recursive: bool = False
+) -> Tuple[bool, str]:
     try:
         if not os.path.exists(path):
             return False, f"Path not found: {path}"
@@ -1210,33 +1298,53 @@ def _fallback_list_directory(path: str, show_hidden: bool = True) -> Tuple[bool,
         if not os.path.isdir(path):
             return False, f"Not a directory: {path}"
         
-        entries = []
-        items = os.listdir(path)
+        def collect_directory(dir_path: str) -> Tuple[list, list]:
+            entries = []
+            subdirs = []
+            items = os.listdir(dir_path)
+            if not show_hidden:
+                items = [item for item in items if not item.startswith('.')]
+            items.sort()
+            for item in items:
+                full_path = os.path.join(dir_path, item)
+                try:
+                    stat_info = os.lstat(full_path)
+                    mode = stat_info.st_mode
+                    perms = stat.filemode(mode)
+                    nlink = stat_info.st_nlink
+                    size = stat_info.st_size
+                    mtime = datetime.fromtimestamp(stat_info.st_mtime).strftime('%b %d %H:%M')
+                    entries.append(f"{perms} {nlink:3} {size:8} {mtime} {item}")
+                    if recursive and os.path.isdir(full_path) and not os.path.islink(full_path):
+                        subdirs.append(full_path)
+                except Exception as e:
+                    entries.append(f"????????? ??? ???????? ??? ??? {item} [Error: {str(e)}]")
+            return entries, subdirs
         
-        if not show_hidden:
-            items = [item for item in items if not item.startswith('.')]
+        if recursive:
+            sections = []
+            visited = set()
+            
+            def walk(current_path: str) -> None:
+                if current_path in visited:
+                    return
+                visited.add(current_path)
+                entries, subdirs = collect_directory(current_path)
+                block_lines = [f"{current_path}:"]
+                if entries:
+                    block_lines.extend(entries)
+                else:
+                    block_lines.append("Empty directory")
+                sections.append("\n".join(block_lines))
+                for subdir in subdirs:
+                    walk(subdir)
+            
+            walk(path)
+            return True, "\n\n".join(sections)
         
-        items.sort()
-        
-        for item in items:
-            full_path = os.path.join(path, item)
-            try:
-                stat_info = os.lstat(full_path)
-                
-                mode = stat_info.st_mode
-                perms = stat.filemode(mode)
-                nlink = stat_info.st_nlink
-                size = stat_info.st_size
-                mtime = datetime.fromtimestamp(stat_info.st_mtime).strftime('%b %d %H:%M')
-                
-                entry = f"{perms} {nlink:3} {size:8} {mtime} {item}"
-                entries.append(entry)
-            except Exception as e:
-                entries.append(f"????????? ??? ???????? ??? ??? {item} [Error: {str(e)}]")
-        
+        entries, _ = collect_directory(path)
         if not entries:
             return True, "Empty directory"
-        
         return True, "\n".join(entries)
     except PermissionError:
         return False, f"Permission denied: {path}"
@@ -1859,6 +1967,12 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
             arguments.get("pattern"),
             arguments.get("path", ".")
         )
+    elif name == "search_symbol":
+        return search_symbol(
+            arguments.get("symbol"),
+            arguments.get("path", "."),
+            arguments.get("max_results"),
+        )
     elif name == "read_file":
         return read_file(
             path=arguments.get("path"),
@@ -1884,7 +1998,8 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
     elif name == "list_directory":
         return list_directory(
             arguments.get("path", "."),
-            arguments.get("show_hidden", True)
+            arguments.get("show_hidden", False),
+            arguments.get("recursive", False)
         )
     elif name == "delete_file":
         return delete_file(

@@ -39,6 +39,30 @@ TOOL_DEFINITIONS = [
         }
     ),
     Tool(
+        name="search_symbol",
+        description="Search for Python function definitions by symbol name and return full function bodies with line numbers.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Function or symbol name to search for"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Starting directory path (default: current directory)",
+                    "default": "."
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of symbol definitions to return",
+                    "minimum": 1
+                }
+            },
+            "required": ["symbol"]
+        }
+    ),
+    Tool(
         name="read_file",
         description="Read contents of a file with optional line range filtering and metadata.",
         inputSchema={
@@ -209,7 +233,12 @@ TOOL_DEFINITIONS = [
                 "show_hidden": {
                     "type": "boolean",
                     "description": "Include hidden files (starting with .)",
-                    "default": True
+                    "default": False
+                },
+                "recursive": {
+                    "type": "boolean",
+                    "description": "Recurse into subdirectories (ls -R style)",
+                    "default": False
                 }
             }
         }

@@ -301,8 +301,16 @@ Patch 模式参数示例：
 
 **参数：**
 ```json
-{"path": "."}
+{
+  "path": ".",
+  "show_hidden": false,
+  "recursive": false
+}
 ```
+
+说明：
+- `show_hidden` 控制是否显示以 `.` 开头的隐藏项，默认 `false`。
+- `recursive` 为 `true` 时会一次性列出整个目录树（效果等同 `ls -R`）。
 
 ---
 

@@ -8,3 +8,5 @@ ddgs>=9.0.0,<10.0.0
 textual>=0.41.0
 tiktoken>=0.5.0
 mcp>=1.0.0
+tree_sitter>=0.22.0
+tree_sitter_language_pack>=0.11.0

@@ -683,10 +683,48 @@ TOOLS_SCHEMA = [
     }
 ]
 
-def search_symbol(symbol: str, path: str = ".", max_results: Optional[int] = None) -> Tuple[bool, str]:
+def search_symbol(
+    symbol: str,
+    path: str = ".",
+    max_results: Optional[int] = None,
+    language: Optional[str] = None,
+    kind: Optional[str] = None,
+    offset: int = 0,
+) -> Tuple[bool, str]:
     """Search function, type, and class definitions by symbol name across supported languages.
 
     Matching is case-sensitive and requires the exact symbol name.
+
+    Optional filters:
+    - language: restrict results to a single language (for example: python, rust, cpp, java, go)
+    - kind: restrict results to a symbol kind (for example: function, class, struct, enum, trait, method, module, type)
+    - offset: skip the first N matching results (simple pagination)
+
+    Return format:
+    - On success: JSON object with shape
+        {
+          "status": "ok",
+          "matches": [
+            {
+              "file": str,
+              "start_line": int,
+              "end_line": int,
+              "language": str | null,
+              "kind": str | null,
+              "name": str | null,
+              "preview": str
+            },
+            ...
+          ]
+        }
+    - On miss: JSON object with shape
+        {
+          "status": "no_match",
+          "reason": "no_indexed_symbols" | "usage_only" | "no_such_symbol",
+          "symbol": str,
+          "path": str,
+          "message": str
+        }
     """
     if not symbol or not isinstance(symbol, str):
         return False, "Symbol name is required"
@@ -696,24 +734,62 @@ def search_symbol(symbol: str, path: str = ".", max_results: Optional[int] = Non
     if not valid:
         return False, err_msg
 
+    if offset < 0:
+        return False, "Offset must be non-negative"
+
+    internal_limit: Optional[int] = max_results
+    if isinstance(max_results, int) and max_results > 0 and offset > 0:
+        internal_limit = max_results + offset
+
     try:
-        blocks = search_symbol_blocks(symbol, resolved_path, max_results)
+        blocks = search_symbol_blocks(symbol, resolved_path, internal_limit)
     except Exception as exc:
         return False, f"Symbol search failed: {str(exc)}"
 
-    if not blocks:
-        return _render_symbol_miss(symbol, resolved_path)
-
-    rendered: list[str] = []
+    filtered_blocks: list[SymbolBlock] = []
     for block in blocks:
-        ok, snippet = _render_symbol_block(block)
-        if ok:
-            rendered.append(snippet)
+        if language and getattr(block, "language", None) != language:
+            continue
+        if kind and getattr(block, "kind", None) != kind:
+            continue
+        filtered_blocks.append(block)
 
-    if not rendered:
+    # Deterministic order: by file path, then start_line.
+    filtered_blocks = sorted(
+        filtered_blocks,
+        key=lambda b: (getattr(b, "filepath", ""), getattr(b, "start_line", 0)),
+    )
+
+    if offset:
+        filtered_blocks = filtered_blocks[offset:]
+    if isinstance(max_results, int) and max_results > 0:
+        filtered_blocks = filtered_blocks[:max_results]
+
+    if not filtered_blocks:
         return _render_symbol_miss(symbol, resolved_path)
 
-    return True, "\n\n".join(rendered)
+    matches: list[dict] = []
+    for block in filtered_blocks:
+        ok, snippet = _render_symbol_block(block)
+        if not ok:
+            continue
+        matches.append(
+            {
+                "file": block.filepath,
+                "start_line": block.start_line,
+                "end_line": block.end_line,
+                "language": getattr(block, "language", None),
+                "kind": getattr(block, "kind", None),
+                "name": getattr(block, "name", None),
+                "preview": snippet,
+            }
+        )
+
+    if not matches:
+        return _render_symbol_miss(symbol, resolved_path)
+
+    payload = {"status": "ok", "matches": matches}
+    return True, json.dumps(payload, indent=2, sort_keys=False)
 
 
 def _render_symbol_block(block: SymbolBlock) -> Tuple[bool, str]:
@@ -752,12 +828,19 @@ def _render_symbol_miss(symbol: str, resolved_path: str) -> Tuple[bool, str]:
     except Exception:
         any_indexed = False
 
+    base = {"status": "no_match", "symbol": symbol, "path": resolved_path}
+
     if not any_indexed:
-        return True, (
-            "No symbol definitions found.\n"
-            "Note: no symbols are indexed under this path. "
-            "The languages here may not be supported by search_symbol."
-        )
+        payload = {
+            **base,
+            "reason": "no_indexed_symbols",
+            "message": (
+                "No symbol definitions found. "
+                "No symbols are indexed under this path. "
+                "The languages here may not be supported by search_symbol."
+            ),
+        }
+        return True, json.dumps(payload, indent=2, sort_keys=False)
 
     found_usage = False
     try:
@@ -768,19 +851,113 @@ def _render_symbol_miss(symbol: str, resolved_path: str) -> Tuple[bool, str]:
         found_usage = False
 
     if found_usage:
-        return True, (
-            "No symbol definitions found.\n"
-            "Plain text search found occurrences of this name, "
-            "but none were recognized as definitional symbols.\n"
-            "This usually means the construct or language is not covered "
-            "by the symbol index (for example, macros or generated code)."
+        payload = {
+            **base,
+            "reason": "usage_only",
+            "message": (
+                "Plain text search found occurrences of this name, "
+                "but none were recognized as definitional symbols. "
+                "This usually means the construct or language is not covered "
+                "by the symbol index (for example, macros or generated code)."
+            ),
+        }
+        return True, json.dumps(payload, indent=2, sort_keys=False)
+
+    payload = {
+        **base,
+        "reason": "no_such_symbol",
+        "message": (
+            "Symbols are indexed under this path, but there is no "
+            f"definition with the exact name '{symbol}'."
+        ),
+    }
+    return True, json.dumps(payload, indent=2, sort_keys=False)
+
+
+def list_symbols(
+    path: str = ".",
+    max_results: Optional[int] = None,
+    language: Optional[str] = None,
+    kind: Optional[str] = None,
+    offset: int = 0,
+) -> Tuple[bool, str]:
+    """List indexed symbols under a path.
+
+    Results include file, line range, language, kind, and name.
+
+    Return format:
+    - On success: JSON object with shape
+        {
+          "status": "ok",
+          "symbols": [
+            {
+              "file": str,
+              "start_line": int,
+              "end_line": int,
+              "language": str | null,
+              "kind": str | null,
+              "name": str | null
+            },
+            ...
+          ]
+        }
+    - If no symbols are indexed: JSON object with shape
+        {
+          "status": "ok",
+          "symbols": []
+        }
+    """
+    resolved_path = resolve_path(path)
+    valid, err_msg = validate_path(resolved_path)
+    if not valid:
+        return False, err_msg
+
+    if offset < 0:
+        return False, "Offset must be non-negative"
+
+    internal_limit: Optional[int] = None
+    if isinstance(max_results, int) and max_results > 0:
+        internal_limit = max_results + offset
+
+    try:
+        blocks = collect_all_symbol_blocks(resolved_path, internal_limit)
+    except Exception as exc:
+        return False, f"Symbol listing failed: {str(exc)}"
+
+    filtered: list[SymbolBlock] = []
+    for block in blocks:
+        if language and getattr(block, "language", None) != language:
+            continue
+        if kind and getattr(block, "kind", None) != kind:
+            continue
+        filtered.append(block)
+
+    # Deterministic ordering for pagination.
+    filtered = sorted(
+        filtered,
+        key=lambda b: (getattr(b, "filepath", ""), getattr(b, "start_line", 0)),
+    )
+
+    if offset:
+        filtered = filtered[offset:]
+    if isinstance(max_results, int) and max_results > 0:
+        filtered = filtered[:max_results]
+
+    symbols: list[dict] = []
+    for block in filtered:
+        symbols.append(
+            {
+                "file": block.filepath,
+                "start_line": block.start_line,
+                "end_line": block.end_line,
+                "language": getattr(block, "language", None),
+                "kind": getattr(block, "kind", None),
+                "name": getattr(block, "name", None),
+            }
         )
 
-    return True, (
-        "No symbol definitions found.\n"
-        "Symbols are indexed under this path, but there is no "
-        f"definition with the exact name '{symbol}'."
-    )
+    payload = {"status": "ok", "symbols": symbols}
+    return True, json.dumps(payload, indent=2, sort_keys=False)
 
 
 
@@ -1935,6 +2112,35 @@ def format_tool_call(name: str, arguments: dict) -> str:
     elif name == "list_directory":
         path = arguments.get("path", ".")
         return f'LIST("{path}")'
+    elif name == "search_symbol":
+        symbol = arguments.get("symbol", "")
+        language = arguments.get("language")
+        kind = arguments.get("kind")
+        offset = arguments.get("offset")
+        parts = [f'"{symbol}"']
+        if language:
+            parts.append(f"lang={language}")
+        if kind:
+            parts.append(f"kind={kind}")
+        if offset:
+            parts.append(f"offset={offset}")
+        return f'SYMBOL({", ".join(parts)})'
+    elif name == "list_symbols":
+        path = arguments.get("path", ".")
+        language = arguments.get("language")
+        kind = arguments.get("kind")
+        max_results = arguments.get("max_results")
+        offset = arguments.get("offset")
+        parts = [f'"{path}"']
+        if language:
+            parts.append(f"lang={language}")
+        if kind:
+            parts.append(f"kind={kind}")
+        if max_results:
+            parts.append(f"max={max_results}")
+        if offset:
+            parts.append(f"offset={offset}")
+        return f'LIST SYMBOLS({", ".join(parts)})'
     elif name == "delete_file":
         path = arguments.get("path", "")
         return f'DELETE FILE("{path}")'
@@ -2023,6 +2229,16 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
             arguments.get("symbol"),
             arguments.get("path", "."),
             arguments.get("max_results"),
+            arguments.get("language"),
+            arguments.get("kind"),
+            arguments.get("offset", 0),
+        )
+    elif name == "list_symbols":
+        return list_symbols(
+            arguments.get("path", "."),
+            arguments.get("max_results"),
+            arguments.get("language"),
+            arguments.get("kind"),
         )
     elif name == "read_file":
         return read_file(

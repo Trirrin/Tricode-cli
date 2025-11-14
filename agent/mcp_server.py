@@ -40,7 +40,13 @@ TOOL_DEFINITIONS = [
     ),
     Tool(
         name="search_symbol",
-        description="Search for function, type, and class definitions by symbol name across supported languages and return full definition blocks with line numbers. Matching is case-sensitive and requires the exact symbol name.",
+        description=(
+            "Search for function, type, and class definitions by symbol name across "
+            "supported languages. Matching is case-sensitive and requires the exact "
+            "symbol name. Only definitional symbols are returned, not usages. "
+            "Macros and some preprocessor constructs are not indexed. "
+            "Results are returned as JSON describing matches and metadata."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -55,8 +61,32 @@ TOOL_DEFINITIONS = [
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum number of symbol definitions to return",
+                    "description": "Maximum number of symbol definitions to return "
+                    "(after applying filters)",
                     "minimum": 1
+                },
+                "language": {
+                    "type": "string",
+                    "description": (
+                        "Optional language filter (for example: python, rust, cpp, java, go). "
+                        "If omitted, all indexed languages are considered."
+                    )
+                },
+                "kind": {
+                    "type": "string",
+                    "description": (
+                        "Optional symbol kind filter (for example: function, class, struct, "
+                        "enum, trait, method, module, type, interface, annotation, record, "
+                        "constructor, impl). If omitted, all kinds are considered."
+                    )
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": (
+                        "Optional number of matching definitions to skip before returning "
+                        "results (for simple pagination)."
+                    ),
+                    "minimum": 0
                 }
             },
             "required": ["symbol"]
@@ -94,6 +124,53 @@ TOOL_DEFINITIONS = [
                 }
             },
             "required": ["path"]
+        }
+    ),
+    Tool(
+        name="list_symbols",
+        description=(
+            "List indexed symbols (functions, types, classes, etc.) under a path. "
+            "Results include file, line range, language, kind, and name. "
+            "Results are returned as JSON with stable ordering. "
+            "Macros and some preprocessor constructs are not indexed."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Starting directory path (default: current directory)",
+                    "default": "."
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of symbols to return (after filters)",
+                    "minimum": 1
+                },
+                "language": {
+                    "type": "string",
+                    "description": (
+                        "Optional language filter (for example: python, rust, cpp, java, go). "
+                        "If omitted, all indexed languages are considered."
+                    )
+                },
+                "kind": {
+                    "type": "string",
+                    "description": (
+                        "Optional symbol kind filter (for example: function, class, struct, "
+                        "enum, trait, method, module, type, interface, annotation, record, "
+                        "constructor, impl). If omitted, all kinds are considered."
+                    )
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": (
+                        "Optional number of matching symbols to skip before returning "
+                        "results (applied after language/kind filters)."
+                    ),
+                    "minimum": 0
+                }
+            }
         }
     ),
     Tool(

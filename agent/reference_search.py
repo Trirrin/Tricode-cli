@@ -1,5 +1,6 @@
 import os
 import re
+import fnmatch
 import hashlib
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -51,6 +52,11 @@ class ReferenceSearchOptions:
     max_results: Optional[int] = None
     mode: str = "include_text"
     sort_by: str = "file"
+    include_definition: bool = False
+    group_by: str = "none"
+    dedup: bool = True
+    files_prefix: Optional[List[str]] = None
+    path_glob: Optional[str] = None
     include_definition: bool = False
     group_by: str = "none"
 
@@ -226,6 +232,8 @@ def find_references(
         _prune_directories(dirnames, options)
         for filename in filenames:
             filepath = os.path.join(dirpath, filename)
+            if _should_skip_file(filepath, resolved_root, options):
+                continue
             file_language = _infer_language_from_extension(filename)
 
             if symbol_language and file_language and symbol_language != file_language:
@@ -290,15 +298,36 @@ def find_references(
         all_references.extend(semantic_references)
         all_references.extend(text_references)
 
-    references_json = _merge_references(
-        all_references,
-        sort_by,
-        symbol_id=identity.symbol_id,
-        group_by=options.group_by,
-    )
-
-    semantic_count = sum(1 for r in references_json if r.get("confidence") != "text_only")
-    text_count = sum(1 for r in references_json if r.get("confidence") == "text_only") if mode == "include_text" else 0
+    if options.dedup:
+        references_json = _merge_references(
+            all_references,
+            sort_by,
+            symbol_id=identity.symbol_id,
+            group_by=options.group_by,
+        )
+        semantic_count = sum(
+            1 for r in references_json if r.get("confidence") != "text_only"
+        )
+        text_count = (
+            sum(1 for r in references_json if r.get("confidence") == "text_only")
+            if mode == "include_text"
+            else 0
+        )
+    else:
+        references_json = _expand_references(
+            all_references,
+            sort_by,
+            symbol_id=identity.symbol_id,
+            group_by=options.group_by,
+        )
+        semantic_count = sum(
+            1 for r in references_json if r.get("confidence") != "text_only"
+        )
+        text_count = (
+            sum(1 for r in references_json if r.get("confidence") == "text_only")
+            if mode == "include_text"
+            else 0
+        )
 
     payload = {
         "status": "ok",
@@ -338,6 +367,26 @@ def _prune_directories(dirnames: List[str], options: ReferenceSearchOptions) -> 
         dirnames.append(name)
 
 
+def _should_skip_file(path: str, root: str, options: ReferenceSearchOptions) -> bool:
+    real_path = os.path.realpath(path)
+    if options.files_prefix:
+        allowed = False
+        for prefix in options.files_prefix:
+            if not prefix:
+                continue
+            prefix_path = os.path.realpath(os.path.join(root, prefix))
+            if real_path.startswith(prefix_path):
+                allowed = True
+                break
+        if not allowed:
+            return True
+    if options.path_glob:
+        rel = os.path.relpath(real_path, root)
+        if not fnmatch.fnmatch(rel, options.path_glob):
+            return True
+    return False
+
+
 def _infer_language_from_extension(filename: str) -> Optional[str]:
     ext = os.path.splitext(filename)[1].lower()
     language_key = _EXTENSION_LANGUAGE.get(ext)
@@ -354,6 +403,69 @@ def _infer_language_from_extension(filename: str) -> Optional[str]:
     if ext == ".py":
         return "python"
     return None
+
+
+def _expand_references(
+    references: List[SymbolReference],
+    sort_by: str,
+    symbol_id: Optional[str],
+    group_by: str,
+) -> List[Dict]:
+    results: List[Dict] = []
+    for ref in references:
+        primary_kind = ref.usage_kind
+        entry = {
+            "file_path": ref.file_path,
+            "start_line": ref.start_line,
+            "start_col": ref.start_col,
+            "end_line": ref.end_line,
+            "end_col": ref.end_col,
+            "language": ref.language,
+            "kind": primary_kind,
+            "primary_kind": primary_kind,
+            "secondary_kinds": [],
+            "is_definition": ref.is_definition,
+            "confidence": ref.confidence,
+            "reason": ref.reason,
+            "symbol_id": symbol_id,
+        }
+        results.append(entry)
+
+    if sort_by == "confidence":
+        rank = {"exact": 0, "probable": 1, "text_only": 2}
+        results.sort(
+            key=lambda r: (
+                rank.get(r.get("confidence", "probable"), 1),
+                r.get("file_path", ""),
+                r.get("start_line", 0),
+                r.get("start_col", 0),
+            )
+        )
+    else:
+        results.sort(
+            key=lambda r: (
+                r.get("file_path", ""),
+                r.get("start_line", 0),
+                r.get("start_col", 0),
+            )
+        )
+
+    if group_by == "file":
+        by_file: Dict[str, List[Dict]] = {}
+        for ref in results:
+            path = ref.get("file_path") or ""
+            by_file.setdefault(path, []).append(ref)
+        for path, refs in by_file.items():
+            for index, ref in enumerate(refs, 1):
+                ref.setdefault("by_file_index", index)
+
+    for index, ref in enumerate(results, 1):
+        raw = f"{ref.get('file_path','')}:{ref.get('start_line',0)}:{ref.get('start_col',0)}:{index}"
+        ref["reference_id"] = hashlib.sha256(
+            raw.encode("utf-8", errors="ignore")
+        ).hexdigest()[:16]
+
+    return results
 
 
 def _merge_references(

@@ -99,7 +99,14 @@ TOOL_DEFINITIONS = [
                         "results (for simple pagination)."
                     ),
                     "minimum": 0
-                }
+                },
+                "fields": {
+                    "type": "array",
+                    "description": "Optional list of fields to include in each match entry (for example: ['location','name','symbol_id','preview'])",
+                    "items": {
+                        "type": "string",
+                    },
+                },
             },
             "required": ["symbol"]
         }
@@ -160,6 +167,10 @@ TOOL_DEFINITIONS = [
                     },
                     "required": [],
                 },
+                "symbol_id": {
+                    "type": "string",
+                    "description": "Optional stable symbol identifier used when symbol object is not provided",
+                },
                 "path": {
                     "type": "string",
                     "description": "Root directory where references are searched",
@@ -205,6 +216,22 @@ TOOL_DEFINITIONS = [
                     "description": "Optional result grouping mode",
                     "enum": ["none", "file"],
                     "default": "none",
+                },
+                "dedup": {
+                    "type": "boolean",
+                    "description": "Whether to merge multiple reference kinds at the same location into one record",
+                    "default": True,
+                },
+                "files_prefix": {
+                    "type": "array",
+                    "description": "Optional list of path prefixes (relative to root path) used to limit reference search scope",
+                    "items": {
+                        "type": "string",
+                    },
+                },
+                "path_glob": {
+                    "type": "string",
+                    "description": "Optional glob pattern (relative to root path) used to limit reference search scope",
                 },
             },
         },
@@ -286,7 +313,14 @@ TOOL_DEFINITIONS = [
                         "results (applied after language/kind filters)."
                     ),
                     "minimum": 0
-                }
+                },
+                "fields": {
+                    "type": "array",
+                    "description": "Optional list of fields to include in each match entry (for example: ['location','name','symbol_id','preview'])",
+                    "items": {
+                        "type": "string",
+                    },
+                },
             }
         }
     ),

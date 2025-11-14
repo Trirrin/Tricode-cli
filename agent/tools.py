@@ -699,6 +699,7 @@ def search_symbol(
     qualified_name: Optional[str] = None,
     enclosing: Optional[str] = None,
     signature_hint: Optional[str] = None,
+    fields: Optional[list[str]] = None,
 ) -> Tuple[bool, str]:
     """Search function, type, and class definitions by symbol name across supported languages.
 
@@ -802,6 +803,8 @@ def search_symbol(
     lines.append("")
     lines.append("definitions:")
 
+    fields_set = set(fields) if fields else None
+
     index = 0
     for block in filtered_blocks:
         ok, snippet = _render_symbol_block(block)
@@ -817,26 +820,31 @@ def search_symbol(
         symbol_id = getattr(block, "symbol_id", None) or ""
         is_test = getattr(block, "is_test", None)
         is_public = getattr(block, "is_public", None)
-        parts = [
-            f"- [{index}]",
-            f"file={block.filepath}",
-            f"start_line={block.start_line}",
-            f"end_line={block.end_line}",
-            f"language={language}",
-            f"kind={kind}",
-            f"name={name}",
-            f"qualified_name={qualified}",
-        ]
-        if symbol_id:
+        parts = [f"- [{index}]"]
+        field_keys = fields_set
+        if field_keys is None or "location" in field_keys:
+            parts.append(f"file={block.filepath}")
+            parts.append(f"start_line={block.start_line}")
+            parts.append(f"end_line={block.end_line}")
+        if field_keys is None or "language" in field_keys:
+            parts.append(f"language={language}")
+        if field_keys is None or "kind" in field_keys:
+            parts.append(f"kind={kind}")
+        if field_keys is None or "name" in field_keys:
+            parts.append(f"name={name}")
+        if field_keys is None or "qualified_name" in field_keys:
+            parts.append(f"qualified_name={qualified}")
+        if (field_keys is None or "symbol_id" in field_keys) and symbol_id:
             parts.append(f"symbol_id={symbol_id}")
-        if is_test is not None:
+        if (field_keys is None or "is_test" in field_keys) and is_test is not None:
             parts.append(f"is_test={bool(is_test)}")
-        if is_public is not None:
+        if (field_keys is None or "is_public" in field_keys) and is_public is not None:
             parts.append(f"is_public={bool(is_public)}")
         lines.append(" ".join(parts))
-        lines.append("    preview:")
-        for raw_line in snippet.splitlines():
-            lines.append(f"        {raw_line}")
+        if field_keys is None or "preview" in field_keys:
+            lines.append("    preview:")
+            for raw_line in snippet.splitlines():
+                lines.append(f"        {raw_line}")
 
     if index == 0:
         return _render_symbol_miss(symbol, resolved_path)
@@ -936,6 +944,7 @@ def list_symbols(
     language: Optional[str] = None,
     kind: Optional[str] = None,
     offset: int = 0,
+    fields: Optional[list[str]] = None,
 ) -> Tuple[bool, str]:
     """List indexed symbols under a path.
 
@@ -1011,6 +1020,7 @@ def list_symbols(
 
     lines.append("")
     lines.append("symbols:")
+    fields_set = set(fields) if fields else None
     for index, block in enumerate(filtered, 1):
         language = getattr(block, "language", None) or "unknown"
         kind = getattr(block, "kind", None) or "unknown"
@@ -1019,21 +1029,25 @@ def list_symbols(
         symbol_id = getattr(block, "symbol_id", None) or ""
         is_test = getattr(block, "is_test", None)
         is_public = getattr(block, "is_public", None)
-        parts = [
-            f"- [{index}]",
-            f"file={block.filepath}",
-            f"start_line={block.start_line}",
-            f"end_line={block.end_line}",
-            f"language={language}",
-            f"kind={kind}",
-            f"name={name}",
-            f"qualified_name={qualified}",
-        ]
-        if symbol_id:
+
+        parts = [f"- [{index}]"]
+        if fields_set is None or "location" in fields_set:
+            parts.append(f"file={block.filepath}")
+            parts.append(f"start_line={block.start_line}")
+            parts.append(f"end_line={block.end_line}")
+        if fields_set is None or "language" in fields_set:
+            parts.append(f"language={language}")
+        if fields_set is None or "kind" in fields_set:
+            parts.append(f"kind={kind}")
+        if fields_set is None or "name" in fields_set:
+            parts.append(f"name={name}")
+        if fields_set is None or "qualified_name" in fields_set:
+            parts.append(f"qualified_name={qualified}")
+        if (fields_set is None or "symbol_id" in fields_set) and symbol_id:
             parts.append(f"symbol_id={symbol_id}")
-        if is_test is not None:
+        if (fields_set is None or "is_test" in fields_set) and is_test is not None:
             parts.append(f"is_test={bool(is_test)}")
-        if is_public is not None:
+        if (fields_set is None or "is_public" in fields_set) and is_public is not None:
             parts.append(f"is_public={bool(is_public)}")
         lines.append(" ".join(parts))
 
@@ -1051,14 +1065,18 @@ def search_references(
     sort_by: str = "file",
     include_definition: bool = False,
     group_by: str = "none",
+    symbol_id: Optional[str] = None,
+    dedup: bool = True,
+    files_prefix: Optional[list[str]] = None,
+    path_glob: Optional[str] = None,
 ) -> Tuple[bool, str]:
     resolved_path = resolve_path(path)
     valid, err_msg = validate_path(resolved_path)
     if not valid:
         return False, err_msg
 
-    if definition is None and symbol is None:
-        return False, "Either definition or symbol must be provided"
+    if definition is None and symbol is None and symbol_id is None:
+        return False, "Either definition, symbol, or symbol_id must be provided"
 
     def_location: Optional[DefinitionLocation] = None
     if definition is not None:
@@ -1075,8 +1093,8 @@ def search_references(
 
     symbol_identity: Optional[SymbolIdentity] = None
     if symbol is not None:
-        symbol_id = symbol.get("symbol_id")
-        if symbol_id is not None and not isinstance(symbol_id, str):
+        symbol_dict_id = symbol.get("symbol_id")
+        if symbol_dict_id is not None and not isinstance(symbol_dict_id, str):
             return False, "symbol.symbol_id must be a string when provided"
         name = symbol.get("name")
         language = symbol.get("language")
@@ -1085,12 +1103,22 @@ def search_references(
         kind = symbol.get("kind")
         if kind is not None and not isinstance(kind, str):
             return False, "symbol.kind must be a string when provided"
-        if not symbol_id and (not name or not isinstance(name, str)):
+        effective_id = symbol_dict_id or symbol_id
+        if not effective_id and (not name or not isinstance(name, str)):
             return False, "symbol.name or symbol.symbol_id is required"
         symbol_identity = SymbolIdentity(
             language=language,
             name=name or "",
             kind=kind,
+            symbol_id=effective_id,
+        )
+    elif symbol_id is not None:
+        if not isinstance(symbol_id, str):
+            return False, "symbol_id must be a string when provided"
+        symbol_identity = SymbolIdentity(
+            language=None,
+            name="",
+            kind=None,
             symbol_id=symbol_id,
         )
 
@@ -1102,6 +1130,9 @@ def search_references(
         sort_by=sort_by,
         include_definition=bool(include_definition),
         group_by=group_by,
+        dedup=bool(dedup),
+        files_prefix=files_prefix,
+        path_glob=path_glob,
     )
 
     try:
@@ -1162,40 +1193,84 @@ def search_references(
         lines.append(f"warning: {message}")
 
     lines.append("")
-    lines.append("references:")
+    if group_by == "file":
+        lines.append("references_by_file:")
+        by_file: dict[str, list[dict]] = {}
+        for ref in references:
+            path = ref.get("file_path") or ""
+            by_file.setdefault(path, []).append(ref)
+        for file_path in sorted(by_file.keys()):
+            refs_for_file = by_file[file_path]
+            lines.append(f"file={file_path} count={len(refs_for_file)}")
+            for index, ref in enumerate(refs_for_file, 1):
+                start_line = ref.get("start_line", 0)
+                start_col = ref.get("start_col", 0)
+                end_line = ref.get("end_line", 0)
+                end_col = ref.get("end_col", 0)
+                language = ref.get("language") or "unknown"
+                primary_kind = ref.get("primary_kind") or ref.get("kind") or "other"
+                secondary_kinds = ref.get("secondary_kinds") or []
+                confidence = ref.get("confidence") or "probable"
+                reason = ref.get("reason")
+                is_definition = bool(ref.get("is_definition"))
+                reference_id = ref.get("reference_id") or ""
+                symbol_id = ref.get("symbol_id") or ""
 
-    for index, ref in enumerate(references, 1):
-        file_path = ref.get("file_path") or ""
-        start_line = ref.get("start_line", 0)
-        start_col = ref.get("start_col", 0)
-        end_line = ref.get("end_line", 0)
-        end_col = ref.get("end_col", 0)
-        language = ref.get("language") or "unknown"
-        primary_kind = ref.get("primary_kind") or ref.get("kind") or "other"
-        secondary_kinds = ref.get("secondary_kinds") or []
-        confidence = ref.get("confidence") or "probable"
-        reason = ref.get("reason")
-        is_definition = bool(ref.get("is_definition"))
-        reference_id = ref.get("reference_id") or ""
-        symbol_id = ref.get("symbol_id") or ""
+                parts = [
+                    f"  - [{index}]",
+                    f"confidence={confidence}",
+                    f"kind={primary_kind}",
+                    f"language={language}",
+                    f"is_definition={is_definition}",
+                    f"location={file_path}:{start_line}:{start_col}->{end_line}:{end_col}",
+                ]
+                if secondary_kinds:
+                    parts.append(
+                        f"secondary_kinds={','.join(sorted(set(secondary_kinds)))}"
+                    )
+                if symbol_id:
+                    parts.append(f"symbol_id={symbol_id}")
+                if reference_id:
+                    parts.append(f"reference_id={reference_id}")
+                lines.append(" ".join(parts))
+                if reason:
+                    lines.append(f"    reason={reason}")
+    else:
+        lines.append("references:")
+        for index, ref in enumerate(references, 1):
+            file_path = ref.get("file_path") or ""
+            start_line = ref.get("start_line", 0)
+            start_col = ref.get("start_col", 0)
+            end_line = ref.get("end_line", 0)
+            end_col = ref.get("end_col", 0)
+            language = ref.get("language") or "unknown"
+            primary_kind = ref.get("primary_kind") or ref.get("kind") or "other"
+            secondary_kinds = ref.get("secondary_kinds") or []
+            confidence = ref.get("confidence") or "probable"
+            reason = ref.get("reason")
+            is_definition = bool(ref.get("is_definition"))
+            reference_id = ref.get("reference_id") or ""
+            symbol_id = ref.get("symbol_id") or ""
 
-        parts = [
-            f"- [{index}]",
-            f"confidence={confidence}",
-            f"kind={primary_kind}",
-            f"language={language}",
-            f"is_definition={is_definition}",
-            f"location={file_path}:{start_line}:{start_col}->{end_line}:{end_col}",
-        ]
-        if secondary_kinds:
-            parts.append(f"secondary_kinds={','.join(sorted(set(secondary_kinds)))}")
-        if symbol_id:
-            parts.append(f"symbol_id={symbol_id}")
-        if reference_id:
-            parts.append(f"reference_id={reference_id}")
-        lines.append(" ".join(parts))
-        if reason:
-            lines.append(f"    reason={reason}")
+            parts = [
+                f"- [{index}]",
+                f"confidence={confidence}",
+                f"kind={primary_kind}",
+                f"language={language}",
+                f"is_definition={is_definition}",
+                f"location={file_path}:{start_line}:{start_col}->{end_line}:{end_col}",
+            ]
+            if secondary_kinds:
+                parts.append(
+                    f"secondary_kinds={','.join(sorted(set(secondary_kinds)))}"
+                )
+            if symbol_id:
+                parts.append(f"symbol_id={symbol_id}")
+            if reference_id:
+                parts.append(f"reference_id={reference_id}")
+            lines.append(" ".join(parts))
+            if reason:
+                lines.append(f"    reason={reason}")
 
     return True, "\n".join(lines)
 
@@ -2356,6 +2431,8 @@ def format_tool_call(name: str, arguments: dict) -> str:
         language = arguments.get("language")
         kind = arguments.get("kind")
         offset = arguments.get("offset")
+        qualified_name = arguments.get("qualified_name")
+        enclosing = arguments.get("enclosing")
         parts = [f'"{symbol}"']
         if language:
             parts.append(f"lang={language}")
@@ -2363,6 +2440,10 @@ def format_tool_call(name: str, arguments: dict) -> str:
             parts.append(f"kind={kind}")
         if offset:
             parts.append(f"offset={offset}")
+        if qualified_name:
+            parts.append(f"q={qualified_name}")
+        if enclosing:
+            parts.append(f"enc={enclosing}")
         return f'SYMBOL({", ".join(parts)})'
     elif name == "list_symbols":
         path = arguments.get("path", ".")
@@ -2496,6 +2577,7 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
             arguments.get("qualified_name"),
             arguments.get("enclosing"),
             arguments.get("signature_hint"),
+            arguments.get("fields"),
         )
     elif name == "list_symbols":
         return list_symbols(
@@ -2504,6 +2586,7 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
             arguments.get("language"),
             arguments.get("kind"),
             arguments.get("offset", 0),
+            arguments.get("fields"),
         )
     elif name == "search_references":
         return search_references(
@@ -2517,6 +2600,10 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
             sort_by=arguments.get("sort_by", "file"),
             include_definition=arguments.get("include_definition", False),
             group_by=arguments.get("group_by", "none"),
+            symbol_id=arguments.get("symbol_id"),
+            dedup=arguments.get("dedup", True),
+            files_prefix=arguments.get("files_prefix"),
+            path_glob=arguments.get("path_glob"),
         )
     elif name == "read_file":
         return read_file(

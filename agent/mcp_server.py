@@ -45,7 +45,7 @@ TOOL_DEFINITIONS = [
             "supported languages. Matching is case-sensitive and requires the exact "
             "symbol name. Only definitional symbols are returned, not usages. "
             "Macros and some preprocessor constructs are not indexed. "
-            "Results are returned as JSON describing matches and metadata."
+            "Results are returned as structured plain text describing matches and metadata."
         ),
         inputSchema={
             "type": "object",
@@ -53,6 +53,18 @@ TOOL_DEFINITIONS = [
                 "symbol": {
                     "type": "string",
                     "description": "Function or symbol name to search for"
+                },
+                "qualified_name": {
+                    "type": "string",
+                    "description": "Optional fully-qualified symbol name (for example: pkg.Type.method)"
+                },
+                "enclosing": {
+                    "type": "string",
+                    "description": "Optional enclosing type, module, or namespace name used to refine matches"
+                },
+                "signature_hint": {
+                    "type": "string",
+                    "description": "Optional free-form signature hint used to rank matches (for example: '(String, int) -> bool')"
                 },
                 "path": {
                     "type": "string",
@@ -93,6 +105,111 @@ TOOL_DEFINITIONS = [
         }
     ),
     Tool(
+        name="search_references",
+        description=(
+            "Search for possible usages or references of a symbol. "
+            "The symbol can be specified by a concrete definition location "
+            "or by a structured symbol identifier. Results include usage kinds "
+            "and confidence levels, and clearly distinguish semantic matches "
+            "from plain text matches."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "definition": {
+                    "type": "object",
+                    "description": "Concrete definition location to base the reference search on.",
+                    "properties": {
+                        "file": {
+                            "type": "string",
+                            "description": "Path to the file that contains the symbol definition",
+                        },
+                        "start_line": {
+                            "type": "integer",
+                            "description": "Definition start line (1-indexed)",
+                            "minimum": 1,
+                        },
+                        "start_col": {
+                            "type": "integer",
+                            "description": "Optional definition start column (0-indexed)",
+                            "minimum": 0,
+                        },
+                    },
+                    "required": ["file", "start_line"],
+                },
+                "symbol": {
+                    "type": "object",
+                    "description": "Structured symbol identifier, used when definition location is not available.",
+                    "properties": {
+                        "language": {
+                            "type": "string",
+                            "description": "Language key such as python, rust, cpp, java, go",
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Symbol name or simple identifier",
+                        },
+                        "kind": {
+                            "type": "string",
+                            "description": "Optional symbol kind such as function, class, method, field",
+                        },
+                        "symbol_id": {
+                            "type": "string",
+                            "description": "Optional stable symbol identifier as returned by search_symbol or list_symbols",
+                        },
+                    },
+                    "required": [],
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Root directory where references are searched",
+                    "default": ".",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of references to return",
+                    "minimum": 1,
+                },
+                "include_tests": {
+                    "type": "boolean",
+                    "description": "Whether to include common test directories and test files in the search",
+                    "default": True,
+                },
+                "include_third_party": {
+                    "type": "boolean",
+                    "description": "Whether to include third-party or vendor directories in the search",
+                    "default": True,
+                },
+                "mode": {
+                    "type": "string",
+                    "description": (
+                        "Reference search mode. "
+                        "\"precise\" returns only semantic references. "
+                        "\"include_text\" also includes plain text matches marked as text_only."
+                    ),
+                    "enum": ["precise", "include_text"],
+                    "default": "include_text",
+                },
+                "sort_by": {
+                    "type": "string",
+                    "description": "Sorting strategy for references",
+                    "default": "file",
+                },
+                "include_definition": {
+                    "type": "boolean",
+                    "description": "Whether to include the symbol definition itself as a reference record",
+                    "default": False,
+                },
+                "group_by": {
+                    "type": "string",
+                    "description": "Optional result grouping mode",
+                    "enum": ["none", "file"],
+                    "default": "none",
+                },
+            },
+        },
+    ),
+    Tool(
         name="read_file",
         description="Read contents of a file with optional line range filtering and metadata.",
         inputSchema={
@@ -131,7 +248,7 @@ TOOL_DEFINITIONS = [
         description=(
             "List indexed symbols (functions, types, classes, etc.) under a path. "
             "Results include file, line range, language, kind, and name. "
-            "Results are returned as JSON with stable ordering. "
+            "Results are returned as structured plain text with stable ordering. "
             "Macros and some preprocessor constructs are not indexed."
         ),
         inputSchema={

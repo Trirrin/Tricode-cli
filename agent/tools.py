@@ -23,6 +23,12 @@ import difflib
 import hashlib
 
 from agent.symbol_search import SymbolBlock, search_symbol_blocks, collect_all_symbol_blocks
+from agent.reference_search import (
+    DefinitionLocation,
+    ReferenceSearchOptions,
+    SymbolIdentity,
+    find_references,
+)
 
 CURRENT_PLAN = None
 CURRENT_SESSION_ID = None
@@ -690,6 +696,9 @@ def search_symbol(
     language: Optional[str] = None,
     kind: Optional[str] = None,
     offset: int = 0,
+    qualified_name: Optional[str] = None,
+    enclosing: Optional[str] = None,
+    signature_hint: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """Search function, type, and class definitions by symbol name across supported languages.
 
@@ -754,10 +763,27 @@ def search_symbol(
             continue
         filtered_blocks.append(block)
 
-    # Deterministic order: by file path, then start_line.
+    def score(block: SymbolBlock) -> int:
+        value = 0
+        if qualified_name:
+            qn = getattr(block, "qualified_name", None) or getattr(block, "name", None) or ""
+            if qn == qualified_name:
+                value += 100
+            elif qn.endswith(qualified_name):
+                value += 60
+        if enclosing:
+            enc = getattr(block, "enclosing_symbol", None) or ""
+            if enc == enclosing:
+                value += 40
+        return value
+
     filtered_blocks = sorted(
         filtered_blocks,
-        key=lambda b: (getattr(b, "filepath", ""), getattr(b, "start_line", 0)),
+        key=lambda b: (
+            -score(b),
+            getattr(b, "filepath", ""),
+            getattr(b, "start_line", 0),
+        ),
     )
 
     if offset:
@@ -768,28 +794,54 @@ def search_symbol(
     if not filtered_blocks:
         return _render_symbol_miss(symbol, resolved_path)
 
-    matches: list[dict] = []
+    lines: list[str] = []
+    lines.append("status=ok")
+    lines.append(f"symbol={symbol}")
+    lines.append(f"path={resolved_path}")
+    lines.append(f"matches={len(filtered_blocks)}")
+    lines.append("")
+    lines.append("definitions:")
+
+    index = 0
     for block in filtered_blocks:
         ok, snippet = _render_symbol_block(block)
         if not ok:
             continue
-        matches.append(
-            {
-                "file": block.filepath,
-                "start_line": block.start_line,
-                "end_line": block.end_line,
-                "language": getattr(block, "language", None),
-                "kind": getattr(block, "kind", None),
-                "name": getattr(block, "name", None),
-                "preview": snippet,
-            }
-        )
+        if signature_hint and signature_hint not in snippet:
+            continue
+        index += 1
+        language = getattr(block, "language", None) or "unknown"
+        kind = getattr(block, "kind", None) or "unknown"
+        name = getattr(block, "name", None) or "unknown"
+        qualified = getattr(block, "qualified_name", None) or name
+        symbol_id = getattr(block, "symbol_id", None) or ""
+        is_test = getattr(block, "is_test", None)
+        is_public = getattr(block, "is_public", None)
+        parts = [
+            f"- [{index}]",
+            f"file={block.filepath}",
+            f"start_line={block.start_line}",
+            f"end_line={block.end_line}",
+            f"language={language}",
+            f"kind={kind}",
+            f"name={name}",
+            f"qualified_name={qualified}",
+        ]
+        if symbol_id:
+            parts.append(f"symbol_id={symbol_id}")
+        if is_test is not None:
+            parts.append(f"is_test={bool(is_test)}")
+        if is_public is not None:
+            parts.append(f"is_public={bool(is_public)}")
+        lines.append(" ".join(parts))
+        lines.append("    preview:")
+        for raw_line in snippet.splitlines():
+            lines.append(f"        {raw_line}")
 
-    if not matches:
+    if index == 0:
         return _render_symbol_miss(symbol, resolved_path)
 
-    payload = {"status": "ok", "matches": matches}
-    return True, json.dumps(payload, indent=2, sort_keys=False)
+    return True, "\n".join(lines)
 
 
 def _render_symbol_block(block: SymbolBlock) -> Tuple[bool, str]:
@@ -828,19 +880,19 @@ def _render_symbol_miss(symbol: str, resolved_path: str) -> Tuple[bool, str]:
     except Exception:
         any_indexed = False
 
-    base = {"status": "no_match", "symbol": symbol, "path": resolved_path}
-
     if not any_indexed:
-        payload = {
-            **base,
-            "reason": "no_indexed_symbols",
-            "message": (
-                "No symbol definitions found. "
+        lines = [
+            "status=no_match",
+            f"symbol={symbol}",
+            f"path={resolved_path}",
+            "reason=no_indexed_symbols",
+            (
+                "message=No symbol definitions found. "
                 "No symbols are indexed under this path. "
                 "The languages here may not be supported by search_symbol."
             ),
-        }
-        return True, json.dumps(payload, indent=2, sort_keys=False)
+        ]
+        return True, "\n".join(lines)
 
     found_usage = False
     try:
@@ -851,27 +903,31 @@ def _render_symbol_miss(symbol: str, resolved_path: str) -> Tuple[bool, str]:
         found_usage = False
 
     if found_usage:
-        payload = {
-            **base,
-            "reason": "usage_only",
-            "message": (
-                "Plain text search found occurrences of this name, "
+        lines = [
+            "status=no_match",
+            f"symbol={symbol}",
+            f"path={resolved_path}",
+            "reason=usage_only",
+            (
+                "message=Plain text search found occurrences of this name, "
                 "but none were recognized as definitional symbols. "
                 "This usually means the construct or language is not covered "
                 "by the symbol index (for example, macros or generated code)."
             ),
-        }
-        return True, json.dumps(payload, indent=2, sort_keys=False)
+        ]
+        return True, "\n".join(lines)
 
-    payload = {
-        **base,
-        "reason": "no_such_symbol",
-        "message": (
-            "Symbols are indexed under this path, but there is no "
+    lines = [
+        "status=no_match",
+        f"symbol={symbol}",
+        f"path={resolved_path}",
+        "reason=no_such_symbol",
+        (
+            "message=Symbols are indexed under this path, but there is no "
             f"definition with the exact name '{symbol}'."
         ),
-    }
-    return True, json.dumps(payload, indent=2, sort_keys=False)
+    ]
+    return True, "\n".join(lines)
 
 
 def list_symbols(
@@ -932,33 +988,216 @@ def list_symbols(
             continue
         filtered.append(block)
 
-    # Deterministic ordering for pagination.
     filtered = sorted(
         filtered,
         key=lambda b: (getattr(b, "filepath", ""), getattr(b, "start_line", 0)),
     )
+
+    total_symbols = len(filtered)
 
     if offset:
         filtered = filtered[offset:]
     if isinstance(max_results, int) and max_results > 0:
         filtered = filtered[:max_results]
 
-    symbols: list[dict] = []
-    for block in filtered:
-        symbols.append(
-            {
-                "file": block.filepath,
-                "start_line": block.start_line,
-                "end_line": block.end_line,
-                "language": getattr(block, "language", None),
-                "kind": getattr(block, "kind", None),
-                "name": getattr(block, "name", None),
-            }
+    lines: list[str] = []
+    lines.append("status=ok")
+    lines.append(f"path={resolved_path}")
+    lines.append(f"total_symbols={total_symbols}")
+
+    if not filtered:
+        lines.append("symbols=(none)")
+        return True, "\n".join(lines)
+
+    lines.append("")
+    lines.append("symbols:")
+    for index, block in enumerate(filtered, 1):
+        language = getattr(block, "language", None) or "unknown"
+        kind = getattr(block, "kind", None) or "unknown"
+        name = getattr(block, "name", None) or "unknown"
+        qualified = getattr(block, "qualified_name", None) or name
+        symbol_id = getattr(block, "symbol_id", None) or ""
+        is_test = getattr(block, "is_test", None)
+        is_public = getattr(block, "is_public", None)
+        parts = [
+            f"- [{index}]",
+            f"file={block.filepath}",
+            f"start_line={block.start_line}",
+            f"end_line={block.end_line}",
+            f"language={language}",
+            f"kind={kind}",
+            f"name={name}",
+            f"qualified_name={qualified}",
+        ]
+        if symbol_id:
+            parts.append(f"symbol_id={symbol_id}")
+        if is_test is not None:
+            parts.append(f"is_test={bool(is_test)}")
+        if is_public is not None:
+            parts.append(f"is_public={bool(is_public)}")
+        lines.append(" ".join(parts))
+
+    return True, "\n".join(lines)
+
+
+def search_references(
+    definition: Optional[dict] = None,
+    symbol: Optional[dict] = None,
+    path: str = ".",
+    max_results: Optional[int] = None,
+    include_tests: bool = True,
+    include_third_party: bool = True,
+    mode: str = "include_text",
+    sort_by: str = "file",
+    include_definition: bool = False,
+    group_by: str = "none",
+) -> Tuple[bool, str]:
+    resolved_path = resolve_path(path)
+    valid, err_msg = validate_path(resolved_path)
+    if not valid:
+        return False, err_msg
+
+    if definition is None and symbol is None:
+        return False, "Either definition or symbol must be provided"
+
+    def_location: Optional[DefinitionLocation] = None
+    if definition is not None:
+        def_path = definition.get("file")
+        def_line = definition.get("start_line")
+        if not def_path or not isinstance(def_path, str):
+            return False, "definition.file is required"
+        if not isinstance(def_line, int) or def_line < 1:
+            return False, "definition.start_line must be a positive integer"
+        def_col = definition.get("start_col")
+        if def_col is not None and (not isinstance(def_col, int) or def_col < 0):
+            return False, "definition.start_col must be a non-negative integer"
+        def_location = DefinitionLocation(file=def_path, start_line=def_line, start_col=def_col)
+
+    symbol_identity: Optional[SymbolIdentity] = None
+    if symbol is not None:
+        symbol_id = symbol.get("symbol_id")
+        if symbol_id is not None and not isinstance(symbol_id, str):
+            return False, "symbol.symbol_id must be a string when provided"
+        name = symbol.get("name")
+        language = symbol.get("language")
+        if language is not None and not isinstance(language, str):
+            return False, "symbol.language must be a string when provided"
+        kind = symbol.get("kind")
+        if kind is not None and not isinstance(kind, str):
+            return False, "symbol.kind must be a string when provided"
+        if not symbol_id and (not name or not isinstance(name, str)):
+            return False, "symbol.name or symbol.symbol_id is required"
+        symbol_identity = SymbolIdentity(
+            language=language,
+            name=name or "",
+            kind=kind,
+            symbol_id=symbol_id,
         )
 
-    payload = {"status": "ok", "symbols": symbols}
-    return True, json.dumps(payload, indent=2, sort_keys=False)
+    options = ReferenceSearchOptions(
+        include_tests=bool(include_tests),
+        include_third_party=bool(include_third_party),
+        max_results=max_results,
+        mode=mode,
+        sort_by=sort_by,
+        include_definition=bool(include_definition),
+        group_by=group_by,
+    )
 
+    try:
+        payload = find_references(
+            root=resolved_path,
+            definition=def_location,
+            symbol=symbol_identity,
+            options=options,
+        )
+    except Exception as exc:
+        return False, f"Reference search failed: {str(exc)}"
+
+    status = payload.get("status")
+    if status != "ok":
+        error = payload.get("error", "unknown_error")
+        message = payload.get("message", "")
+        lines = [
+            f"status=error",
+            f"error={error}",
+        ]
+        if message:
+            lines.append(f"message={message}")
+        return True, "\n".join(lines)
+
+    symbol_info = payload.get("symbol", {}) or {}
+    capabilities = payload.get("capabilities", {}) or {}
+    summary = payload.get("summary", {}) or {}
+    references = payload.get("references", []) or []
+    warnings = payload.get("warnings", []) or []
+
+    lines: list[str] = []
+    lines.append("status=ok")
+    lines.append(
+        "symbol: "
+        f"source={symbol_info.get('source') or 'unknown'} "
+        f"language={symbol_info.get('language') or 'unknown'} "
+        f"name={symbol_info.get('name') or 'unknown'} "
+        f"kind={symbol_info.get('kind') or 'unknown'} "
+        f"symbol_id={symbol_info.get('symbol_id') or 'unknown'}"
+    )
+
+    semantic_langs = capabilities.get("semantic_languages") or []
+    text_fallback = capabilities.get("text_fallback", False)
+    lines.append(
+        "capabilities: "
+        f"semantic_languages={','.join(semantic_langs)} "
+        f"text_fallback={bool(text_fallback)}"
+    )
+
+    lines.append(
+        "summary: "
+        f"total={summary.get('total', 0)} "
+        f"semantic={summary.get('semantic', 0)} "
+        f"text_only={summary.get('text_only', 0)}"
+    )
+
+    for message in warnings:
+        lines.append(f"warning: {message}")
+
+    lines.append("")
+    lines.append("references:")
+
+    for index, ref in enumerate(references, 1):
+        file_path = ref.get("file_path") or ""
+        start_line = ref.get("start_line", 0)
+        start_col = ref.get("start_col", 0)
+        end_line = ref.get("end_line", 0)
+        end_col = ref.get("end_col", 0)
+        language = ref.get("language") or "unknown"
+        primary_kind = ref.get("primary_kind") or ref.get("kind") or "other"
+        secondary_kinds = ref.get("secondary_kinds") or []
+        confidence = ref.get("confidence") or "probable"
+        reason = ref.get("reason")
+        is_definition = bool(ref.get("is_definition"))
+        reference_id = ref.get("reference_id") or ""
+        symbol_id = ref.get("symbol_id") or ""
+
+        parts = [
+            f"- [{index}]",
+            f"confidence={confidence}",
+            f"kind={primary_kind}",
+            f"language={language}",
+            f"is_definition={is_definition}",
+            f"location={file_path}:{start_line}:{start_col}->{end_line}:{end_col}",
+        ]
+        if secondary_kinds:
+            parts.append(f"secondary_kinds={','.join(sorted(set(secondary_kinds)))}")
+        if symbol_id:
+            parts.append(f"symbol_id={symbol_id}")
+        if reference_id:
+            parts.append(f"reference_id={reference_id}")
+        lines.append(" ".join(parts))
+        if reason:
+            lines.append(f"    reason={reason}")
+
+    return True, "\n".join(lines)
 
 
 
@@ -2141,6 +2380,28 @@ def format_tool_call(name: str, arguments: dict) -> str:
         if offset:
             parts.append(f"offset={offset}")
         return f'LIST SYMBOLS({", ".join(parts)})'
+    elif name == "search_references":
+        definition = arguments.get("definition")
+        symbol = arguments.get("symbol")
+        mode = arguments.get("mode")
+        parts: list[str] = []
+        if definition:
+            path = definition.get("file", "")
+            line = definition.get("start_line")
+            if line is not None:
+                parts.append(f'def="{path}:{line}"')
+            else:
+                parts.append(f'def="{path}"')
+        elif symbol:
+            lang = symbol.get("language")
+            sym_name = symbol.get("name", "")
+            if lang:
+                parts.append(f'sym="{lang}:{sym_name}"')
+            else:
+                parts.append(f'sym="{sym_name}"')
+        if mode:
+            parts.append(f"mode={mode}")
+        return f'REFS({", ".join(parts)})'
     elif name == "delete_file":
         path = arguments.get("path", "")
         return f'DELETE FILE("{path}")'
@@ -2232,6 +2493,9 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
             arguments.get("language"),
             arguments.get("kind"),
             arguments.get("offset", 0),
+            arguments.get("qualified_name"),
+            arguments.get("enclosing"),
+            arguments.get("signature_hint"),
         )
     elif name == "list_symbols":
         return list_symbols(
@@ -2239,6 +2503,20 @@ def execute_tool(name: str, arguments: dict) -> Tuple[bool, str]:
             arguments.get("max_results"),
             arguments.get("language"),
             arguments.get("kind"),
+            arguments.get("offset", 0),
+        )
+    elif name == "search_references":
+        return search_references(
+            definition=arguments.get("definition"),
+            symbol=arguments.get("symbol"),
+            path=arguments.get("path", "."),
+            max_results=arguments.get("max_results"),
+            include_tests=arguments.get("include_tests", True),
+            include_third_party=arguments.get("include_third_party", True),
+            mode=arguments.get("mode", "include_text"),
+            sort_by=arguments.get("sort_by", "file"),
+            include_definition=arguments.get("include_definition", False),
+            group_by=arguments.get("group_by", "none"),
         )
     elif name == "read_file":
         return read_file(

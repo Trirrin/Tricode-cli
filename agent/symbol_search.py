@@ -1,6 +1,7 @@
 import ast
 import os
 import re
+import hashlib
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable, Iterable, List, Optional
@@ -17,6 +18,14 @@ class SymbolBlock:
     language: Optional[str] = None
     kind: Optional[str] = None
     name: Optional[str] = None
+    qualified_name: Optional[str] = None
+    symbol_id: Optional[str] = None
+    is_test: Optional[bool] = None
+    is_public: Optional[bool] = None
+    visibility: Optional[str] = None
+    is_static: Optional[bool] = None
+    enclosing_symbol: Optional[str] = None
+    role: Optional[str] = None
 
 
 @dataclass
@@ -25,6 +34,20 @@ class TreeSitterConfig:
     node_types: tuple[str, ...]
     comment_prefixes: tuple[str, ...]
     extractor: Callable[[Node, bytes], Iterable[str]]
+
+
+def compute_symbol_id(
+    language: Optional[str],
+    kind: Optional[str],
+    qualified_name: Optional[str],
+    name: Optional[str],
+) -> str:
+    base_language = language or ""
+    base_kind = kind or ""
+    identifier = qualified_name or name or ""
+    raw = f"{base_language}:{base_kind}:{identifier}"
+    digest = hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+    return digest[:16]
 
 
 def search_symbol_blocks(symbol: str, root: str, max_results: Optional[int]) -> List[SymbolBlock]:
@@ -117,16 +140,31 @@ def _collect_python_blocks(
                 else:
                     kind = "function"
 
-                matches.append(
-                    SymbolBlock(
-                        filepath=filepath,
-                        start_line=start_line,
-                        end_line=end_line,
-                        language="python",
-                        kind=kind,
-                        name=node_name,
-                    )
+                qualified_name = node_name
+                is_test = node_name.startswith("test")
+                is_public = not node_name.startswith("_")
+                visibility = "public" if is_public else "private"
+
+                block = SymbolBlock(
+                    filepath=filepath,
+                    start_line=start_line,
+                    end_line=end_line,
+                    language="python",
+                    kind=kind,
+                    name=node_name,
+                    qualified_name=qualified_name,
+                    is_test=is_test,
+                    is_public=is_public,
+                    visibility=visibility,
+                    role="primary_impl",
                 )
+                block.symbol_id = compute_symbol_id(
+                    block.language,
+                    block.kind,
+                    block.qualified_name,
+                    block.name,
+                )
+                matches.append(block)
                 if max_count is not None and len(matches) >= max_count:
                     return matches
 
@@ -223,16 +261,47 @@ def _collect_tree_sitter_blocks(
 
                 kind = _infer_symbol_kind(language_key, node.type)
 
-                matches.append(
-                    SymbolBlock(
-                        filepath=filepath,
-                        start_line=start_line,
-                        end_line=end_line,
-                        language=config.language,
-                        kind=kind,
-                        name=primary_name,
-                    )
+                qualified_name = primary_name
+                is_test = False
+                is_public: Optional[bool] = None
+                visibility: Optional[str] = None
+                is_static: Optional[bool] = None
+                enclosing_symbol: Optional[str] = None
+
+                if language_key == "java" and primary_name:
+                    enclosing_symbol = _java_enclosing_type_name(node, source_bytes)
+                    if enclosing_symbol:
+                        qualified_name = f"{enclosing_symbol}.{primary_name}"
+                    visibility, is_public, is_static = _java_modifiers(node, source_bytes)
+                    is_test = _java_is_test(node, source_bytes, primary_name)
+                else:
+                    if primary_name and primary_name.startswith("test"):
+                        is_test = True
+                    if primary_name:
+                        is_public = not primary_name.startswith("_")
+
+                block = SymbolBlock(
+                    filepath=filepath,
+                    start_line=start_line,
+                    end_line=end_line,
+                    language=config.language,
+                    kind=kind,
+                    name=primary_name,
+                    qualified_name=qualified_name,
+                    is_test=is_test,
+                    is_public=is_public,
+                    visibility=visibility,
+                    is_static=is_static,
+                    enclosing_symbol=enclosing_symbol,
+                    role="primary_impl",
                 )
+                block.symbol_id = compute_symbol_id(
+                    block.language,
+                    block.kind,
+                    block.qualified_name,
+                    block.name,
+                )
+                matches.append(block)
                 if max_count is not None and len(matches) >= max_count:
                     return matches
 
@@ -357,8 +426,10 @@ def _infer_symbol_kind(language_key: str, node_type: str) -> Optional[str]:
             return "type"
         return None
     if lang == "rust":
-        if t in ("function_item", "method_item"):
+        if t == "function_item":
             return "function"
+        if t == "method_item":
+            return "method"
         if t == "struct_item":
             return "struct"
         if t == "enum_item":
@@ -470,3 +541,71 @@ _EXTENSION_LANGUAGE = {
     ".go": "go",
     ".rs": "rust",
 }
+
+
+def _java_enclosing_type_name(node: Node, source: bytes) -> Optional[str]:
+    current = node.parent
+    while current is not None:
+        if current.type in (
+            "class_declaration",
+            "interface_declaration",
+            "enum_declaration",
+            "record_declaration",
+            "annotation_type_declaration",
+        ):
+            child = current.child_by_field_name("name")
+            if child is None:
+                return None
+            return _slice_text(source, child)
+        current = current.parent
+    return None
+
+
+def _java_modifiers(
+    node: Node,
+    source: bytes,
+) -> tuple[Optional[str], Optional[bool], Optional[bool]]:
+    visibility: Optional[str] = None
+    is_public: Optional[bool] = None
+    is_static: Optional[bool] = None
+
+    modifiers_node: Optional[Node] = None
+    for child in node.children:
+        if child.type == "modifiers":
+            modifiers_node = child
+            break
+
+    targets = modifiers_node.children if modifiers_node is not None else node.children
+    for child in targets:
+        text = _slice_text(source, child).strip()
+        if not text:
+            continue
+        if text == "public":
+            visibility = "public"
+            is_public = True
+        elif text == "protected" and visibility is None:
+            visibility = "protected"
+            is_public = False
+        elif text == "private" and visibility is None:
+            visibility = "private"
+            is_public = False
+        elif text == "static":
+            is_static = True
+
+    return visibility, is_public, is_static
+
+
+def _java_is_test(node: Node, source: bytes, method_name: str) -> bool:
+    if method_name.startswith("test"):
+        return True
+
+    for child in node.children:
+        if child.type not in ("annotation", "marker_annotation"):
+            continue
+        name_node = child.child_by_field_name("name")
+        if name_node is None:
+            continue
+        text = _slice_text(source, name_node)
+        if text.endswith("Test"):
+            return True
+    return False

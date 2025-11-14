@@ -28,17 +28,39 @@ def search_symbol_blocks(symbol: str, root: str, max_results: Optional[int]) -> 
     if not symbol:
         return []
 
-    python_blocks = _collect_python_symbol_blocks(root, symbol, max_results)
+    python_blocks = _collect_python_blocks(
+        root=root,
+        max_results=max_results,
+        name_predicate=lambda name: name == symbol,
+    )
     remaining = None
     if isinstance(max_results, int) and max_results > 0:
         remaining = max(max_results - len(python_blocks), 0)
 
     tree_sitter_limit = remaining if remaining not in (None, 0) else None
-    tree_blocks = _collect_tree_sitter_blocks(root, symbol, tree_sitter_limit)
+    tree_blocks = _collect_tree_sitter_blocks(
+        root=root,
+        max_results=tree_sitter_limit,
+        name_predicate=lambda names: _symbol_matches(symbol, names),
+    )
     return python_blocks + tree_blocks
 
 
-def _collect_python_symbol_blocks(root: str, symbol: str, max_results: Optional[int]) -> List[SymbolBlock]:
+def collect_all_symbol_blocks(root: str, max_results: Optional[int]) -> List[SymbolBlock]:
+    python_blocks = _collect_python_blocks(root=root, max_results=max_results)
+    remaining = None
+    if isinstance(max_results, int) and max_results > 0:
+        remaining = max(max_results - len(python_blocks), 0)
+    tree_sitter_limit = remaining if remaining not in (None, 0) else None
+    tree_blocks = _collect_tree_sitter_blocks(root=root, max_results=tree_sitter_limit)
+    return python_blocks + tree_blocks
+
+
+def _collect_python_blocks(
+    root: str,
+    max_results: Optional[int],
+    name_predicate: Optional[Callable[[str], bool]] = None,
+) -> List[SymbolBlock]:
     matches: List[SymbolBlock] = []
     max_count = max_results if isinstance(max_results, int) and max_results > 0 else None
 
@@ -62,7 +84,7 @@ def _collect_python_symbol_blocks(root: str, symbol: str, max_results: Optional[
             for node in ast.walk(module):
                 if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     continue
-                if node.name != symbol:
+                if name_predicate is not None and not name_predicate(node.name):
                     continue
 
                 start_line = _python_node_start_line(node)
@@ -110,7 +132,11 @@ def _infer_python_end_line(lines: List[str], start_line: int) -> int:
     return end_index + 1
 
 
-def _collect_tree_sitter_blocks(root: str, symbol: str, max_results: Optional[int]) -> List[SymbolBlock]:
+def _collect_tree_sitter_blocks(
+    root: str,
+    max_results: Optional[int],
+    name_predicate: Optional[Callable[[Iterable[str]], bool]] = None,
+) -> List[SymbolBlock]:
     matches: List[SymbolBlock] = []
     max_count = max_results if isinstance(max_results, int) and max_results > 0 else None
 
@@ -142,7 +168,7 @@ def _collect_tree_sitter_blocks(root: str, symbol: str, max_results: Optional[in
                 names = list(config.extractor(node, source_bytes))
                 if not names:
                     continue
-                if not _symbol_matches(symbol, names):
+                if name_predicate is not None and not name_predicate(names):
                     continue
 
                 start_line = node.start_point[0] + 1
